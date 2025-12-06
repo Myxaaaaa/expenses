@@ -4,12 +4,14 @@ import logging
 import sys
 import socket
 import time
+import signal
+import atexit
 from datetime import datetime, timedelta
 from html import escape
 from dateutil import parser as date_parser
 from dateutil import tz
 from telegram import Update
-from telegram.error import NetworkError, TimedOut
+from telegram.error import NetworkError, TimedOut, Conflict
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 from database import Database
@@ -32,7 +34,11 @@ DATETIME_FORMATS = [
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -40,7 +46,19 @@ logger = logging.getLogger(__name__)
 db = Database()
 
 # Токен бота: можно переопределить через переменную окружения BOT_TOKEN
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8137903259:AAG0VVcKfLDcOBdHQT_ADIR8s5daVu69eqU")
+# ВАЖНО: Используем токен из кода, игнорируя переменную окружения если она установлена неправильно
+DEFAULT_TOKEN = "8137903259:AAG0VVcKfLDcOBdHQT_ADIR8s5daVu69eqU"
+ENV_TOKEN = os.getenv("BOT_TOKEN", None)
+# Используем токен из переменной окружения только если он правильный (начинается с 8137903259)
+if ENV_TOKEN and ENV_TOKEN.startswith("8137903259"):
+    BOT_TOKEN = ENV_TOKEN
+    logger.info("Используется токен из переменной окружения")
+else:
+    BOT_TOKEN = DEFAULT_TOKEN
+    if ENV_TOKEN:
+        logger.warning(f"Переменная окружения BOT_TOKEN установлена, но использует другой токен. Используется токен из кода.")
+    else:
+        logger.info("Используется токен из кода")
 
 # Настройки прокси для обхода блокировки Telegram API
 # Поддерживаемые форматы:
@@ -127,48 +145,64 @@ def build_message_link(chat_id: int, chat_username: str, message_id: int) -> str
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start"""
-    chat_info = (
-        f"Тип чата: {update.message.chat.type}\n"
-        f"Chat ID: {update.message.chat.id}"
-    )
-    await update.message.reply_text(
-        "💰 Бот для учета расходов\n\n"
-        "Как добавить расход:\n"
-        "1. Ответьте на сообщение (или фото), к которому относится расход\n"
-        "2. Напишите сумму с описанием\n"
-        "3. Обязательно упомяните бота (@имябота)\n"
-        "Пример: @bot 1500 продукты\n\n"
-        "Команды:\n"
-        "/expenses — расходы за сегодня\n"
-        "/expenses_week — расходы за неделю\n"
-        "/expenses_month — расходы за месяц\n"
-        "/expenses_period 01.01.2024 07.01.2024 — расходы за период\n"
-        "/delete <ID> — удалить свой расход\n"
-        "/setrole <роль> — назначить роль (админ/шеф, по ответу или тегу)\n"
-        "/setname <имя> — установить имя (по ответу или тегу)\n"
-        "/roles — список ролей\n"
-        "/info — информация о пользователе (по ответу/тегу) или всех\n"
-        "/test — проверить работу бота\n\n"
-        f"ℹ️ {chat_info}"
-    )
+    try:
+        logger.info(f"Получена команда /start от пользователя {update.message.from_user.id} в чате {update.message.chat.id}")
+        chat_info = (
+            f"Тип чата: {update.message.chat.type}\n"
+            f"Chat ID: {update.message.chat.id}"
+        )
+        await update.message.reply_text(
+            "💰 Бот для учета расходов\n\n"
+            "Как добавить расход:\n"
+            "1. Ответьте на сообщение (или фото), к которому относится расход\n"
+            "2. Напишите сумму с описанием\n"
+            "3. Обязательно упомяните бота (@имябота)\n"
+            "Пример: @bot 1500 продукты\n\n"
+            "Команды:\n"
+            "/expenses — расходы за сегодня\n"
+            "/expenses_week — расходы за неделю\n"
+            "/expenses_month — расходы за месяц\n"
+            "/expenses_period 01.01.2024 07.01.2024 — расходы за период\n"
+            "/delete <ID> — удалить свой расход\n"
+            "/setrole <роль> — назначить роль (админ/шеф, по ответу или тегу)\n"
+            "/setname <имя> — установить имя (по ответу или тегу)\n"
+            "/roles — список ролей\n"
+            "/info — информация о пользователе (по ответу/тегу) или всех\n"
+            "/test — проверить работу бота\n\n"
+            f"ℹ️ {chat_info}"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в команде /start: {e}", exc_info=True)
+        try:
+            await update.message.reply_text(f"❌ Ошибка: {e}")
+        except:
+            pass
 
 
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Тестовая команда для проверки работы бота"""
-    chat_type = update.message.chat.type
-    chat_id = update.message.chat.id
-    user = update.message.from_user
-    
-    test_message = (
-        f"✅ Бот работает!\n\n"
-        f"📊 Информация:\n"
-        f"Тип чата: {chat_type}\n"
-        f"Chat ID: {chat_id}\n"
-        f"Пользователь: {user.first_name} (@{user.username or 'нет username'})\n\n"
-        f"💡 Попробуйте написать: 100 тест"
-    )
-    
-    await update.message.reply_text(test_message)
+    try:
+        logger.info(f"Получена команда /test от пользователя {update.message.from_user.id} в чате {update.message.chat.id}")
+        chat_type = update.message.chat.type
+        chat_id = update.message.chat.id
+        user = update.message.from_user
+        
+        test_message = (
+            f"✅ Бот работает!\n\n"
+            f"📊 Информация:\n"
+            f"Тип чата: {chat_type}\n"
+            f"Chat ID: {chat_id}\n"
+            f"Пользователь: {user.first_name} (@{user.username or 'нет username'})\n\n"
+            f"💡 Попробуйте написать: 100 тест"
+        )
+        
+        await update.message.reply_text(test_message)
+    except Exception as e:
+        logger.error(f"Ошибка в команде /test: {e}", exc_info=True)
+        try:
+            await update.message.reply_text(f"❌ Ошибка: {e}")
+        except:
+            pass
 
 
 def get_user_role_from_db(chat_id: int, user_id: int) -> Optional[str]:
@@ -898,12 +932,42 @@ def main():
         else:
             print("⚠️  Прокси указан, но не удалось настроить. Попробую подключиться напрямую...")
     
+    # Глобальная переменная для application (для graceful shutdown)
+    global_application = None
+    
+    # Обработчик сигналов для graceful shutdown
+    def signal_handler(signum, frame):
+        logger.info(f"Получен сигнал {signum}, останавливаем бота...")
+        if global_application:
+            try:
+                global_application.stop()
+            except:
+                pass
+        sys.exit(0)
+    
+    # Регистрируем обработчики сигналов
+    signal.signal(signal.SIGINT, signal_handler)
+    if hasattr(signal, 'SIGTERM'):
+        signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Обработчик при выходе
+    def cleanup():
+        logger.info("Выполняется очистка перед выходом...")
+        if global_application:
+            try:
+                global_application.stop()
+            except:
+                pass
+    
+    atexit.register(cleanup)
+    
     # Создаем приложение
     try:
         builder = Application.builder().token(BOT_TOKEN)
         if request:
             builder = builder.request(request)
         application = builder.build()
+        global_application = application
     except Exception as e:
         print(f"\n❌ Ошибка при создании приложения: {e}")
         print("Проверьте правильность токена бота и настройки прокси (если используется).")
@@ -936,6 +1000,29 @@ def main():
     # Раскомментируйте следующую строку для отладки:
     # application.add_handler(MessageHandler(filters.ChatType.GROUPS, debug_handler))
     
+    # Добавляем глобальный обработчик ошибок
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Обработчик всех ошибок"""
+        logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+        if isinstance(update, Update) and update.message:
+            try:
+                await update.message.reply_text(f"❌ Произошла ошибка: {context.error}")
+            except:
+                pass
+    
+    application.add_error_handler(error_handler)
+    
+    # Логируем все входящие обновления для отладки
+    async def log_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Логирует все входящие обновления"""
+        if update.message:
+            logger.info(f"Получено сообщение: chat_id={update.message.chat.id}, user_id={update.message.from_user.id}, text={update.message.text}")
+        elif update.callback_query:
+            logger.info(f"Получен callback_query: chat_id={update.callback_query.message.chat.id if update.callback_query.message else None}")
+    
+    # Добавляем обработчик для логирования (низкий приоритет)
+    application.add_handler(MessageHandler(filters.ALL, log_update), group=-1)
+    
     # Запускаем бота с обработкой ошибок
     logger.info("Бот запущен...")
     try:
@@ -958,6 +1045,17 @@ def main():
                 drop_pending_updates=True
             )
             break  # Успешный запуск, выходим из цикла
+        except Conflict as e:
+            print("\n❌ ОШИБКА: Уже запущен другой экземпляр бота!")
+            print("Telegram не позволяет запускать несколько экземпляров бота одновременно.")
+            print("\nРешение:")
+            print("1. Остановите все запущенные экземпляры бота")
+            print("2. Подождите 10-20 секунд")
+            print("3. Запустите бота снова")
+            print("\nДля остановки всех процессов Python с ботом:")
+            print("  Get-Process python | Stop-Process")
+            logger.error(f"Конфликт: другой экземпляр бота уже запущен: {e}")
+            sys.exit(1)
         except (NetworkError, TimedOut) as e:
             retry_count += 1
             error_msg = str(e)
