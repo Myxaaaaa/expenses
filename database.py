@@ -1,4 +1,5 @@
 import sqlite3
+import os
 from datetime import datetime
 from typing import List, Tuple, Optional
 from dateutil import tz
@@ -6,7 +7,31 @@ from dateutil import tz
 
 class Database:
     def __init__(self, db_name: str = "expenses.db"):
-        self.db_name = db_name
+        """
+        Инициализация базы данных.
+        На Railway, если подключен Volume, БД будет храниться на Volume,
+        чтобы не пропадать после перезапуска контейнера.
+        """
+        # 1. Явный путь из переменной окружения (можно задать самому)
+        env_db_path = os.getenv("DB_PATH")
+
+        # 2. Стандартный путь Railway Volume (если Volume подключен)
+        railway_volume = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+
+        if env_db_path:
+            self.db_name = env_db_path
+        elif railway_volume:
+            # Кладём файл БД внутрь смонтированного тома
+            self.db_name = os.path.join(railway_volume, "expenses.db")
+        else:
+            # Локальный запуск — обычный файл рядом с кодом
+            self.db_name = db_name
+
+        # Создаём папку при необходимости
+        db_dir = os.path.dirname(self.db_name)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+
         self.init_db()
     
     def get_connection(self):

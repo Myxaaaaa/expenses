@@ -6,6 +6,8 @@ import socket
 import time
 import signal
 import atexit
+import io
+import json
 from datetime import datetime, timedelta
 from html import escape
 from dateutil import parser as date_parser
@@ -15,6 +17,7 @@ from telegram.error import NetworkError, TimedOut, Conflict
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 from database import Database
+from database_postgres import PostgresDatabase
 from typing import Optional
 
 # Часовой пояс Бишкека (UTC+6)
@@ -42,8 +45,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация базы данных
-db = Database()
+# Инициализация базы данных:
+# локально или без PostgreSQL используем SQLite,
+# на Railway с DATABASE_URL — PostgreSQL.
+if os.getenv("DATABASE_URL"):
+    db = PostgresDatabase()
+else:
+    db = Database()
 
 # Токен бота: можно переопределить через переменную окружения BOT_TOKEN
 # ВАЖНО: Используем токен из кода, игнорируя переменную окружения если она установлена неправильно
@@ -67,6 +75,15 @@ else:
 PROXY_URL = os.getenv("PROXY_URL", None)
 PROXY_USERNAME = os.getenv("PROXY_USERNAME", None)
 PROXY_PASSWORD = os.getenv("PROXY_PASSWORD", None)
+
+# Путь для долговременного хранения экспортов/логов расходов
+DATA_DIR = os.getenv("DATA_DIR") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or "."
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except Exception:
+    # Если не удалось создать каталог, откатываемся к текущей директории
+    DATA_DIR = "."
+EXPENSES_JSONL_PATH = os.path.join(DATA_DIR, "expenses_log.jsonl")
 
 
 def parse_expense(text: str, bot_username: str = None) -> tuple:
@@ -619,6 +636,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 expense_date=current_time
             )
             logger.info(f"Расход добавлен в БД с ID: {expense_id}")
+
+            # Дополнительно пишем в JSONL-файл на долговременное хранилище (том Railway)
+            record = {
+                "id": expense_id,
+                "chat_id": update.message.chat.id,
+                "user_id": user.id,
+                "username": username,
+                "amount": amount,
+                "description": description,
+                "message_id": update.message.message_id,
+                "original_message_id": original_message_id,
+                "created_at": current_time.isoformat(),
+            }
+            try:
+                with open(EXPENSES_JSONL_PATH, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            except Exception as log_err:
+                logger.error(f"Не удалось записать расход в JSONL: {log_err}", exc_info=True)
         except Exception as e:
             logger.error(f"Ошибка при добавлении расхода в БД: {e}")
             await update.message.reply_text(
@@ -899,6 +934,138 @@ async def delete_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка при удалении: {e}")
 
 
+async def export_today_pm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Экспорт расходов за период в TXT-файл и отправка админу в личку.
+    Команду нужно вызывать в группе, где ведётся учёт.
+    Доступно только для ролей администратор/шеф или админа группы.
+    Форматы:
+      /export_today_pm              - все расходы за сегодня
+      /export_today_pm @username    - расходы только этого пользователя за сегодня
+      /export_week_pm               - расходы за последние 7 дней
+      /export_month_pm              - расходы за последние 30 дней
+    """
+    if not update.message:
+        return
+
+    chat = update.message.chat
+    chat_id = chat.id
+    chat_type = chat.type
+    issuer = update.message.from_user
+    issuer_id = issuer.id
+
+    # Команду ожидаем именно из группы/супергруппы
+    if chat_type not in ["group", "supergroup"]:
+        await update.message.reply_text("❌ Эту команду нужно вызывать в группе, где ведётся учёт расходов.")
+        return
+
+    # Проверяем роль (как в /setrole и /delete)
+    issuer_role = get_user_role_from_db(chat_id, issuer_id)
+    is_privileged = issuer_role in ["администратор", "шеф"]
+
+    if not is_privileged:
+        try:
+            member = await context.bot.get_chat_member(chat_id, issuer_id)
+            if member.status not in ["administrator", "creator"]:
+                await update.message.reply_text("❌ Только администраторы и шефы могут делать выгрузку расходов")
+                return
+        except Exception:
+            await update.message.reply_text("❌ Только администраторы и шефы могут делать выгрузку расходов")
+            return
+
+    # Опциональный фильтр по username (@username)
+    target_username = None
+    if context.args:
+        arg = context.args[0]
+        if arg.startswith("@"):
+            target_username = arg.lstrip("@").strip()
+        else:
+            # Если передали без @, тоже считаем username
+            target_username = arg.strip()
+
+    # Базовая дата (сегодня) в часовом поясе Бишкека
+    base_today = get_bishkek_today()
+
+    # Определяем период по команде
+    command = update.message.text.split()[0] if update.message.text else "/export_today_pm"
+    if command == "/export_week_pm":
+        end_date = base_today.replace(hour=23, minute=59, second=59, microsecond=999999)
+        start_date = base_today - timedelta(days=7)
+        start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif command == "/export_month_pm":
+        end_date = base_today.replace(hour=23, minute=59, second=59, microsecond=999999)
+        start_date = base_today - timedelta(days=30)
+        start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        # По умолчанию — только сегодня
+        start_date = base_today
+        end_date = base_today.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    expenses = db.get_expenses(chat_id, start_date=start_date, end_date=end_date)
+
+    # Фильтрация по username при необходимости
+    if target_username:
+        filtered = []
+        for exp in expenses:
+            _, _, username, amount, description, category, message_id, date_str = exp
+            if username and username.lower() == target_username.lower():
+                filtered.append(exp)
+        expenses = filtered
+
+    if not expenses:
+        if target_username:
+            await update.message.reply_text(f"📭 Нет расходов за выбранный период для пользователя @{target_username}.")
+        else:
+            await update.message.reply_text("📭 Нет расходов за выбранный период.")
+        return
+
+    # Формируем строки для TXT
+    lines = []
+    for exp in expenses:
+        expense_id, user_id, username, amount, description, category, message_id, date_str = exp
+        date_obj = parse_db_datetime(date_str)
+        username_display = username or "нет username"
+        line = (
+            f"{date_obj.strftime('%Y-%m-%d %H:%M')} | "
+            f"{amount:.2f} | "
+            f"{description} | "
+            f"{username_display} | "
+            f"ID:{expense_id}"
+        )
+        lines.append(line)
+
+    txt_content = "\n".join(lines)
+
+    # Готовим файл в памяти
+    period_label = f"{start_date.strftime('%Y-%m-%d')}..{end_date.strftime('%Y-%m-%d')}"
+    filename = f"expenses_{chat_id}_{period_label}.txt"
+    if target_username:
+        filename = f"expenses_{chat_id}_{target_username}_{period_label}.txt"
+
+    file_bytes = io.BytesIO(txt_content.encode("utf-8"))
+    file_bytes.name = filename
+
+    # Отправляем файл админу в личку
+    caption = f"💾 Выгрузка расходов за период {period_label}\nЧат: {chat.title or chat_id}\nКоличество записей: {len(lines)}"
+    if target_username:
+        caption += f"\nФильтр по пользователю: @{target_username}"
+
+    try:
+        await context.bot.send_document(
+            chat_id=issuer_id,
+            document=file_bytes,
+            filename=filename,
+            caption=caption,
+        )
+        await update.message.reply_text("✅ Выгрузка отправлена вам в личные сообщения.")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке выгрузки в личку: {e}", exc_info=True)
+        await update.message.reply_text(
+            "❌ Не удалось отправить файл в личку.\n"
+            "Убедитесь, что вы писали боту в личные сообщения (нажмите /start в личке с ботом)."
+        )
+
+
 def main():
     """Запуск бота"""
     if not BOT_TOKEN:
@@ -985,6 +1152,9 @@ def main():
     application.add_handler(CommandHandler("roles", list_roles))
     application.add_handler(CommandHandler("setname", set_name))
     application.add_handler(CommandHandler("info", info))
+    application.add_handler(CommandHandler("export_today_pm", export_today_pm))
+    application.add_handler(CommandHandler("export_week_pm", export_today_pm))
+    application.add_handler(CommandHandler("export_month_pm", export_today_pm))
     
     # Обработчик всех текстовых сообщений (включая ответы)
     # Обрабатываем сообщения с текстом или ответы на сообщения
