@@ -17,8 +17,14 @@ from telegram.error import NetworkError, TimedOut, Conflict
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 from database import Database
-from database_postgres import PostgresDatabase
 from typing import Optional
+
+# Postgres-реализация может отсутствовать (например, в старом деплое),
+# поэтому импортируем её безопасно.
+try:
+    from database_postgres import PostgresDatabase  # type: ignore
+except ModuleNotFoundError:
+    PostgresDatabase = None  # type: ignore
 
 # Часовой пояс Бишкека (UTC+6)
 BISHKEK_TZ = tz.gettz('Asia/Bishkek')
@@ -46,10 +52,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Инициализация базы данных:
-# локально или без PostgreSQL используем SQLite,
-# на Railway с DATABASE_URL — PostgreSQL.
-if os.getenv("DATABASE_URL"):
-    db = PostgresDatabase()
+# - если есть DATABASE_URL и доступен PostgresDatabase → PostgreSQL
+# - иначе → SQLite
+if os.getenv("DATABASE_URL") and PostgresDatabase is not None:
+    db = PostgresDatabase()  # type: ignore[call-arg]
 else:
     db = Database()
 
