@@ -29,6 +29,9 @@ except ModuleNotFoundError:
 # Часовой пояс Бишкека (UTC+6)
 BISHKEK_TZ = tz.gettz('Asia/Bishkek')
 
+# Суточный лимит расходов по чату (в сомах)
+DAILY_EXPENSE_LIMIT = 500_000
+
 ALLOWED_ROLES = {
     "оператор",
     "администратор",
@@ -632,6 +635,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             # Используем текущее время в часовом поясе Бишкека
             current_time = get_bishkek_now()
+
+            # Считаем сумму расходов за сегодня ДО добавления нового расхода
+            today_start = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_end = current_time.replace(hour=23, minute=59, second=59, microsecond=999999)
+            previous_total_today = db.get_total_amount(
+                chat_id=update.message.chat.id,
+                start_date=today_start,
+                end_date=today_end
+            )
+
             expense_id = db.add_expense(
                 chat_id=update.message.chat.id,
                 user_id=user.id,
@@ -642,6 +655,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 expense_date=current_time
             )
             logger.info(f"Расход добавлен в БД с ID: {expense_id}")
+
+            # Новая сумма за сегодня с учётом только что добавленного расхода
+            new_total_today = (previous_total_today or 0) + amount
 
             # Дополнительно пишем в JSONL-файл на долговременное хранилище (том Railway)
             record = {
@@ -678,6 +694,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_text,
             reply_to_message_id=update.message.message_id
         )
+
+        # Если при добавлении этого расхода суточный лимит был превышен — отправляем предупреждение в группу
+        try:
+            if (
+                'new_total_today' in locals()
+                and 'previous_total_today' in locals()
+                and previous_total_today <= DAILY_EXPENSE_LIMIT
+                and new_total_today > DAILY_EXPENSE_LIMIT
+            ):
+                warning_text = (
+                    "🚨 ПРЕВЫШЕН ДНЕВНОЙ ЛИМИТ ПО РАСХОДАМ!\n"
+                    f"💵 Общая сумма за сегодня: {new_total_today:.2f} сом"
+                )
+                await context.bot.send_message(
+                    chat_id=update.message.chat.id,
+                    text=warning_text
+                )
+        except Exception as warn_err:
+            logger.error(f"Ошибка при отправке предупреждения о превышении лимита: {warn_err}", exc_info=True)
     except Exception as e:
         logger.error(f"Ошибка в handle_message: {e}", exc_info=True)
 
