@@ -251,7 +251,7 @@ def get_chat_daily_limit(chat_id: int) -> float:
             return float(DAILY_EXPENSE_LIMIT)
         return float(limit)
     except Exception as e:
-        logger.error(f\"Ошибка при получении дневного лимита для чата {chat_id}: {e}\", exc_info=True)
+        logger.error(f"Ошибка при получении дневного лимита для чата {chat_id}: {e}", exc_info=True)
         return float(DAILY_EXPENSE_LIMIT)
 
 async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1180,8 +1180,8 @@ async def set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ Лимит сброшен. Теперь используется лимит по умолчанию: {DAILY_EXPENSE_LIMIT:.2f} сом"
             )
         except Exception as e:
-            logger.error(f\"Ошибка при сбросе дневного лимита: {e}\", exc_info=True)
-            await update.message.reply_text(f\"❌ Ошибка при сбросе лимита: {e}\")
+            logger.error(f"Ошибка при сбросе дневного лимита: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Ошибка при сбросе лимита: {e}")
         return
 
     # Пытаемся распарсить число
@@ -1208,8 +1208,8 @@ async def set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Лимит обновлён: {limit_value:.2f} сом"
         )
     except Exception as e:
-        logger.error(f\"Ошибка при установке дневного лимита: {e}\", exc_info=True)
-        await update.message.reply_text(f\"❌ Ошибка при установке лимита: {e}\")
+        logger.error(f"Ошибка при установке дневного лимита: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Ошибка при установке лимита: {e}")
 
 
 def main():
