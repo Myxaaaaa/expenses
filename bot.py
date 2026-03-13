@@ -29,7 +29,8 @@ except ModuleNotFoundError:
 # Часовой пояс Бишкека (UTC+6)
 BISHKEK_TZ = tz.gettz('Asia/Bishkek')
 
-# Суточный лимит расходов по чату (в сомах)
+# Базовый (дефолтный) суточный лимит расходов по чату (в сомах).
+# Может быть переопределён для каждого чата через команду /limit.
 DAILY_EXPENSE_LIMIT = 500_000
 
 ALLOWED_ROLES = {
@@ -237,6 +238,21 @@ def get_user_role_from_db(chat_id: int, user_id: int) -> Optional[str]:
     if role_result:
         return role_result[0]
     return None
+
+
+def get_chat_daily_limit(chat_id: int) -> float:
+    """
+    Возвращает суточный лимит для чата.
+    Если в БД не задан, используется значение по умолчанию DAILY_EXPENSE_LIMIT.
+    """
+    try:
+        limit = db.get_daily_limit(chat_id)
+        if limit is None:
+            return float(DAILY_EXPENSE_LIMIT)
+        return float(limit)
+    except Exception as e:
+        logger.error(f\"Ошибка при получении дневного лимита для чата {chat_id}: {e}\", exc_info=True)
+        return float(DAILY_EXPENSE_LIMIT)
 
 async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Назначает роль пользователю (только администраторы и шефы)"""
@@ -636,6 +652,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Используем текущее время в часовом поясе Бишкека
             current_time = get_bishkek_now()
 
+            # Получаем суточный лимит для этого чата
+            daily_limit = get_chat_daily_limit(update.message.chat.id)
+
             # Считаем сумму расходов за сегодня ДО добавления нового расхода
             today_start = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
             today_end = current_time.replace(hour=23, minute=59, second=59, microsecond=999999)
@@ -700,12 +719,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if (
                 'new_total_today' in locals()
                 and 'previous_total_today' in locals()
-                and previous_total_today <= DAILY_EXPENSE_LIMIT
-                and new_total_today > DAILY_EXPENSE_LIMIT
+                and 'daily_limit' in locals()
+                and previous_total_today <= daily_limit
+                and new_total_today > daily_limit
             ):
                 warning_text = (
                     "🚨 ПРЕВЫШЕН ДНЕВНОЙ ЛИМИТ ПО РАСХОДАМ!\n"
-                    f"💵 Общая сумма за сегодня: {new_total_today:.2f} сом"
+                    f"💵 Общая сумма за сегодня: {new_total_today:.2f} сом\n"
+                    f"📊 Установленный лимит: {daily_limit:.2f} сом"
                 )
                 await context.bot.send_message(
                     chat_id=update.message.chat.id,
@@ -1107,6 +1128,90 @@ async def export_today_pm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Устанавливает или показывает суточный лимит расходов для чата.
+
+    Форматы:
+      /limit              - показать текущий лимит
+      /limit 600000       - установить лимит 600000 сом
+      /limit off          - убрать лимит (будет использоваться лимит по умолчанию)
+
+    Менять лимит могут только администраторы/шефы или админы группы.
+    """
+    if not update.message:
+        return
+
+    chat = update.message.chat
+    chat_id = chat.id
+    user = update.message.from_user
+    user_id = user.id
+
+    # Проверяем права (как в /export_today_pm)
+    issuer_role = get_user_role_from_db(chat_id, user_id)
+    is_privileged = issuer_role in ["администратор", "шеф"]
+
+    if not is_privileged:
+        try:
+            member = await context.bot.get_chat_member(chat_id, user_id)
+            if member.status not in ["administrator", "creator"]:
+                await update.message.reply_text("❌ Только администраторы и шефы могут менять лимит")
+                return
+        except Exception:
+            await update.message.reply_text("❌ Только администраторы и шефы могут менять лимит")
+            return
+
+    # Если аргументов нет — просто показываем текущий лимит
+    if not context.args:
+        current_limit = get_chat_daily_limit(chat_id)
+        await update.message.reply_text(
+            f"📊 Текущий суточный лимит: {current_limit:.2f} сом\n"
+            f"(Лимит по умолчанию: {DAILY_EXPENSE_LIMIT:.2f} сом)"
+        )
+        return
+
+    arg = context.args[0].strip().lower()
+
+    # /limit off — сброс лимита к значению по умолчанию
+    if arg in ["off", "none", "0"]:
+        try:
+            db.set_daily_limit(chat_id, None)
+            await update.message.reply_text(
+                f"✅ Лимит сброшен. Теперь используется лимит по умолчанию: {DAILY_EXPENSE_LIMIT:.2f} сом"
+            )
+        except Exception as e:
+            logger.error(f\"Ошибка при сбросе дневного лимита: {e}\", exc_info=True)
+            await update.message.reply_text(f\"❌ Ошибка при сбросе лимита: {e}\")
+        return
+
+    # Пытаемся распарсить число
+    try:
+        raw_value = context.args[0].replace(" ", "").replace(",", ".")
+        limit_value = float(raw_value)
+        if limit_value <= 0:
+            await update.message.reply_text("❌ Лимит должен быть положительным числом")
+            return
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Не удалось распознать число.\n"
+            "Примеры:\n"
+            "/limit 600000\n"
+            "/limit 250000.50\n"
+            "/limit off  — сбросить лимит к значению по умолчанию"
+        )
+        return
+
+    # Сохраняем лимит в БД
+    try:
+        db.set_daily_limit(chat_id, limit_value)
+        await update.message.reply_text(
+            f"✅ Лимит обновлён: {limit_value:.2f} сом"
+        )
+    except Exception as e:
+        logger.error(f\"Ошибка при установке дневного лимита: {e}\", exc_info=True)
+        await update.message.reply_text(f\"❌ Ошибка при установке лимита: {e}\")
+
+
 def main():
     """Запуск бота"""
     if not BOT_TOKEN:
@@ -1193,6 +1298,7 @@ def main():
     application.add_handler(CommandHandler("roles", list_roles))
     application.add_handler(CommandHandler("setname", set_name))
     application.add_handler(CommandHandler("info", info))
+    application.add_handler(CommandHandler("limit", set_limit))
     application.add_handler(CommandHandler("export_today_pm", export_today_pm))
     application.add_handler(CommandHandler("export_week_pm", export_today_pm))
     application.add_handler(CommandHandler("export_month_pm", export_today_pm))

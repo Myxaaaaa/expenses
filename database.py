@@ -38,7 +38,7 @@ class Database:
         return sqlite3.connect(self.db_name)
     
     def init_db(self):
-        """Создает таблицу для хранения расходов"""
+        """Создает таблицы для хранения данных (расходы, роли, имена, настройки чата)"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
@@ -76,6 +76,13 @@ class Database:
                 assigned_by INTEGER,
                 assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(chat_id, user_id)
+            )
+        """)
+        # Таблица настроек чата (в том числе суточный лимит расходов)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_settings (
+                chat_id INTEGER PRIMARY KEY,
+                daily_limit REAL
             )
         """)
         conn.commit()
@@ -188,6 +195,50 @@ class Database:
         result = cursor.fetchone()
         conn.close()
         return result[0] if result[0] else 0.0
+
+    # ----- Настройки чата (лимит расходов и т.п.) -----
+
+    def set_daily_limit(self, chat_id: int, limit: Optional[float]) -> None:
+        """
+        Устанавливает суточный лимит расходов для чата.
+        Если limit is None, лимит сбрасывается (будет использоваться значение по умолчанию в боте).
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        if limit is None:
+            cursor.execute(
+                """
+                INSERT INTO chat_settings (chat_id, daily_limit)
+                VALUES (?, NULL)
+                ON CONFLICT(chat_id) DO UPDATE SET daily_limit = NULL
+                """,
+                (chat_id,),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO chat_settings (chat_id, daily_limit)
+                VALUES (?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET daily_limit = excluded.daily_limit
+                """,
+                (chat_id, limit),
+            )
+        conn.commit()
+        conn.close()
+
+    def get_daily_limit(self, chat_id: int) -> Optional[float]:
+        """Возвращает суточный лимит расходов для чата или None, если не задан."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT daily_limit FROM chat_settings WHERE chat_id = ?",
+            (chat_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return row[0]
 
     def set_role(self, chat_id: int, user_id: int, username: str,
                  role: str, assigned_by: int) -> None:

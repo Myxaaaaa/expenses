@@ -69,6 +69,15 @@ class PostgresDatabase:
             );
             """
         )
+        # Таблица настроек чата (суточный лимит расходов и др.)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_settings (
+                chat_id BIGINT PRIMARY KEY,
+                daily_limit DOUBLE PRECISION
+            );
+            """
+        )
         conn.commit()
         conn.close()
 
@@ -208,6 +217,54 @@ class PostgresDatabase:
         row = cur.fetchone()
         conn.close()
         return float(row["total"] or 0.0)
+
+    # ----- Настройки чата (лимит расходов и т.п.) -----
+
+    def set_daily_limit(self, chat_id: int, limit: Optional[float]) -> None:
+        """
+        Устанавливает суточный лимит расходов для чата.
+        Если limit is None, лимит сбрасывается (будет использоваться значение по умолчанию в боте).
+        """
+        conn = self.get_connection()
+        cur = conn.cursor()
+        if limit is None:
+            cur.execute(
+                """
+                INSERT INTO chat_settings (chat_id, daily_limit)
+                VALUES (%s, NULL)
+                ON CONFLICT (chat_id) DO UPDATE SET daily_limit = NULL;
+                """,
+                (chat_id,),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO chat_settings (chat_id, daily_limit)
+                VALUES (%s, %s)
+                ON CONFLICT (chat_id) DO UPDATE SET daily_limit = EXCLUDED.daily_limit;
+                """,
+                (chat_id, limit),
+            )
+        conn.commit()
+        conn.close()
+
+    def get_daily_limit(self, chat_id: int) -> Optional[float]:
+        """Возвращает суточный лимит расходов для чата или None, если не задан."""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT daily_limit
+            FROM chat_settings
+            WHERE chat_id = %s;
+            """,
+            (chat_id,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return row["daily_limit"]
 
     def set_role(
         self, chat_id: int, user_id: int, username: str, role: str, assigned_by: int
