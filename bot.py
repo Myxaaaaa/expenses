@@ -1214,6 +1214,31 @@ async def handle_expense_edit_message(update: Update, context: ContextTypes.DEFA
         logger.debug(f"Не удалось отредактировать сообщение расхода: {e}")
         await update.message.reply_text(f"✅ Изменено. Расход ID {expense_id} — {amount:.2f} сом — {escape(description)}", parse_mode="HTML")
 
+    # Если меняли сумму — проверяем суточный лимит и при превышении отправляем предупреждение
+    if field == "amount":
+        try:
+            current_time = get_bishkek_now()
+            today_start = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_end = current_time.replace(hour=23, minute=59, second=59, microsecond=999999)
+            total_today = db.get_total_amount(
+                chat_id=chat_id,
+                start_date=today_start,
+                end_date=today_end
+            ) or 0
+            daily_limit = get_chat_daily_limit(chat_id)
+            if total_today > daily_limit:
+                warning_text = (
+                    "🚨 ПРЕВЫШЕН ДНЕВНОЙ ЛИМИТ ПО РАСХОДАМ!\n"
+                    f"💵 Общая сумма за сегодня: {total_today:.2f} сом\n"
+                    f"📊 Установленный лимит: {daily_limit:.2f} сом"
+                )
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=warning_text
+                )
+        except Exception as warn_err:
+            logger.error(f"Ошибка при отправке предупреждения о превышении лимита при редактировании: {warn_err}", exc_info=True)
+
     context.user_data["_last_edit_message_id"] = update.message.message_id
 
 
