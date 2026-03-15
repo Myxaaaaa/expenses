@@ -198,10 +198,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/test — проверить работу бота\n\n"
             f"ℹ️ {chat_info}"
         )
+        await _delete_command_message(update)
     except Exception as e:
         logger.error(f"Ошибка в команде /start: {e}", exc_info=True)
         try:
             await update.message.reply_text(f"❌ Ошибка: {e}")
+            await _delete_command_message(update)
         except:
             pass
 
@@ -224,10 +226,12 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         await update.message.reply_text(test_message)
+        await _delete_command_message(update)
     except Exception as e:
         logger.error(f"Ошибка в команде /test: {e}", exc_info=True)
         try:
             await update.message.reply_text(f"❌ Ошибка: {e}")
+            await _delete_command_message(update)
         except:
             pass
 
@@ -267,11 +271,13 @@ async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
             member = await context.bot.get_chat_member(chat_id, issuer_id)
             if member.status not in ["administrator", "creator"]:
                 await update.message.reply_text("❌ Только администраторы и шефы могут назначать роли")
+                await _delete_command_message(update)
                 return
         except:
             await update.message.reply_text("❌ Только администраторы и шефы могут назначать роли")
+            await _delete_command_message(update)
             return
-    
+
     # Определяем целевого пользователя: из reply или из упоминания
     target_user = None
     role_parts = []
@@ -363,6 +369,7 @@ async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• /setrole оператор (в ответ на сообщение)\n"
                 "• /setrole @username оператор"
             )
+        await _delete_command_message(update)
         return
     
     # Если роль не извлечена, берем из аргументов
@@ -375,13 +382,15 @@ async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Укажите роль. Доступно: оператор, администратор, шеф\n"
             "Пример: /setrole оператор (в ответ на сообщение или с упоминанием)"
         )
+        await _delete_command_message(update)
         return
-    
+
     role = " ".join(role_parts).strip().lower()
     if role not in ALLOWED_ROLES:
         await update.message.reply_text(
             "❌ Неизвестная роль. Доступно: оператор, администратор, шеф"
         )
+        await _delete_command_message(update)
         return
     
     db.set_role(
@@ -397,6 +406,7 @@ async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ Роль назначена:\n"
         f"{target_name} — {role}"
     )
+    await _delete_command_message(update)
 
 
 async def list_roles(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -406,8 +416,9 @@ async def list_roles(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not roles:
         await update.message.reply_text("ℹ️ Роли пока не назначены")
+        await _delete_command_message(update)
         return
-    
+
     lines = ["👥 Роли участников:"]
     for user_id, username, role, assigned_at in roles:
         name = db.get_name(chat_id, user_id) or username or "Без имени"
@@ -417,8 +428,9 @@ async def list_roles(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             ts = assigned_at.strftime("%Y-%m-%d %H:%M")
         lines.append(f"• {name} — {role} (назначено {ts})")
-    
+
     await update.message.reply_text("\n".join(lines))
+    await _delete_command_message(update)
 
 
 async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -517,8 +529,9 @@ async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• /setname Иван (в ответ на сообщение)\n"
                 "• /setname @username Иван"
             )
+        await _delete_command_message(update)
         return
-    
+
     # Если имя не извлечено из аргументов, берем все аргументы (фильтруя упоминания)
     if not name_parts and context.args:
         name_parts = [arg for arg in context.args if not arg.startswith('@')]
@@ -530,13 +543,15 @@ async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /setname Иван (в ответ на сообщение)\n"
             "• /setname @username Иван"
         )
+        await _delete_command_message(update)
         return
-    
+
     name = " ".join(name_parts).strip()
     if not name:
         await update.message.reply_text("❌ Имя не может быть пустым")
+        await _delete_command_message(update)
         return
-    
+
     db.set_name(
         chat_id=chat_id,
         user_id=target_user.id,
@@ -549,6 +564,7 @@ async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ Имя установлено:\n"
         f"{target_user.first_name} → {name}"
     )
+    await _delete_command_message(update)
 
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -619,12 +635,14 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"ID: {user_id}"
         )
         await update.message.reply_text(info_text)
+        await _delete_command_message(update)
     else:
         # Общая информация о всех участниках
         all_info = db.get_all_info(chat_id)
-        
+
         if not all_info:
             await update.message.reply_text("ℹ️ Информация о участниках отсутствует")
+            await _delete_command_message(update)
             return
         
         lines = ["👥 Информация о участниках:\n"]
@@ -652,6 +670,7 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(current)
         else:
             await update.message.reply_text(message_text)
+    await _delete_command_message(update)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -775,18 +794,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Отправляем подтверждение с ID и инлайн-кнопками
+        # Отправляем подтверждение с полным набором инлайн-кнопок (подтвердить, изменить, удалить)
+        user_msg_id = update.message.message_id
         reply_text = (
             f"✅ Расход добавлен (ID: {expense_id})\n"
             f"💸 {amount:.2f} сом — {escape(description)}\n"
             f"📎 Ответ на сообщение #{original_message_id}"
         )
-        confirm_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Подтвердить", callback_data=f"exp_confirm:{expense_id}")]
-        ])
+        confirm_keyboard = _expense_actions_keyboard(expense_id, user_msg_id)
         await update.message.reply_text(
             reply_text,
-            reply_to_message_id=update.message.message_id,
+            reply_to_message_id=user_msg_id,
             reply_markup=confirm_keyboard,
             parse_mode="HTML"
         )
@@ -830,8 +848,9 @@ async def show_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE,
         elif start_date:
             period_text = f" с {start_date.strftime('%d.%m.%Y')}"
         await update.message.reply_text(f"📭 Нет расходов{period_text}")
+        await _delete_command_message(update)
         return
-    
+
     # Формируем сообщение
     message_parts = []
     
@@ -898,8 +917,20 @@ async def show_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE,
         
         if current_message:
             await update.message.reply_text(current_message, parse_mode='HTML')
+        await _delete_command_message(update)
     else:
         await update.message.reply_text(full_message, parse_mode='HTML')
+        await _delete_command_message(update)
+
+
+async def _delete_command_message(update: Update) -> None:
+    """Удаляет сообщение с командой в чате, чтобы оставался только ответ бота. Права на удаление не проверяются."""
+    if not update.message:
+        return
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
 
 
 def get_bishkek_now():
@@ -982,8 +1013,9 @@ async def expenses_period(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "или\n"
             "/expenses_period 2024-01-01 2024-01-31"
         )
+        await _delete_command_message(update)
         return
-    
+
     try:
         start_date = date_parser.parse(context.args[0], dayfirst=True)
         end_date = date_parser.parse(context.args[1], dayfirst=True)
@@ -998,53 +1030,72 @@ async def expenses_period(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_expenses(update, context, start_date=start_date, end_date=end_date)
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка парсинга даты: {e}")
+        await _delete_command_message(update)
 
 
-def _expense_actions_keyboard(expense_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура после подтверждения: изменить сумму, название, удалить"""
+def _expense_actions_keyboard(expense_id: int, user_msg_id: int = None) -> InlineKeyboardMarkup:
+    """Полная клавиатура: подтвердить, изменить сумму/название, удалить. user_msg_id — ID сообщения пользователя (для удаления после нажатия)."""
+    suffix = f":{user_msg_id}" if user_msg_id is not None else ""
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Подтвердить", callback_data=f"exp_confirm:{expense_id}{suffix}")],
         [
-            InlineKeyboardButton("💵 Изменить сумму", callback_data=f"exp_amt:{expense_id}"),
-            InlineKeyboardButton("📝 Изменить название", callback_data=f"exp_name:{expense_id}"),
+            InlineKeyboardButton("💵 Изменить сумму", callback_data=f"exp_amt:{expense_id}{suffix}"),
+            InlineKeyboardButton("📝 Изменить название", callback_data=f"exp_name:{expense_id}{suffix}"),
         ],
-        [InlineKeyboardButton("🗑 Удалить расход", callback_data=f"exp_del:{expense_id}")],
+        [InlineKeyboardButton("🗑 Удалить расход", callback_data=f"exp_del:{expense_id}{suffix}")],
     ])
 
 
-async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка нажатий инлайн-кнопок у расходов: подтвердить, изменить сумму/название, удалить"""
-    query = update.callback_query
-    await query.answer()
-    if not query.data or not query.data.startswith("exp_"):
-        return
-    parts = query.data.split(":", 1)
-    if len(parts) != 2:
-        return
+def _parse_expense_callback_data(data: str):
+    """Парсит callback_data: exp_action:expense_id или exp_action:expense_id:user_msg_id. Возвращает (action, expense_id, user_msg_id)."""
+    if not data or not data.startswith("exp_"):
+        return None, None, None
+    parts = data.split(":")
+    if len(parts) < 2:
+        return None, None, None
     action, expense_id_str = parts[0], parts[1]
+    user_msg_id = int(parts[2]) if len(parts) > 2 else None
     try:
         expense_id = int(expense_id_str)
     except ValueError:
+        return None, None, None
+    return action, expense_id, user_msg_id
+
+
+async def _delete_messages_safe(context, chat_id: int, *message_ids: int):
+    """Удаляет сообщения в чате, игнорирует ошибки (нет прав и т.д.)."""
+    for mid in message_ids:
+        if mid is None:
+            continue
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+
+
+async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатий инлайн-кнопок: удаляем сообщение с кнопками и сообщение пользователя, отправляем только итог."""
+    query = update.callback_query
+    await query.answer()
+    action, expense_id, user_msg_id = _parse_expense_callback_data(query.data or "")
+    if expense_id is None:
         return
     chat_id = query.message.chat.id
-    message_id = query.message.message_id
+    bot_msg_id = query.message.message_id
     user_id = query.from_user.id if query.from_user else None
+
+    # Удаляем сообщение бота (с кнопками) и сообщение пользователя (с текстом расхода)
+    await _delete_messages_safe(context, chat_id, bot_msg_id, user_msg_id)
 
     if action == "exp_confirm":
         expense = db.get_expense_by_id(expense_id, chat_id)
         if not expense:
-            await query.edit_message_text("❌ Расход не найден.")
+            await context.bot.send_message(chat_id, "❌ Расход не найден.", parse_mode="HTML")
             return
         _, _, username, amount, description, _, _, date_str = expense
-        date_obj = parse_db_datetime(date_str)
-        new_text = (
-            f"✅ Расход (ID: {expense_id})\n"
-            f"💸 {amount:.2f} сом — {escape(description)}\n"
-            f"👤 {escape(username)} | {date_obj.strftime('%d.%m.%Y %H:%M')}\n\n"
-            "✅ Подтверждено"
-        )
-        await query.edit_message_text(
-            new_text,
-            reply_markup=_expense_actions_keyboard(expense_id),
+        await context.bot.send_message(
+            chat_id,
+            f"✅ Подтверждено. Расход ID {expense_id} — {amount:.2f} сом — {escape(description)}",
             parse_mode="HTML",
         )
         return
@@ -1052,26 +1103,24 @@ async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_
     if action in ("exp_amt", "exp_name"):
         expense = db.get_expense_by_id(expense_id, chat_id)
         if not expense:
-            await query.answer("❌ Расход не найден.", show_alert=True)
+            await context.bot.send_message(chat_id, "❌ Расход не найден.", parse_mode="HTML")
             return
         field = "amount" if action == "exp_amt" else "description"
+        prompt_text = "✏️ Напишите новую сумму (одним числом):" if field == "amount" else "✏️ Напишите новое название расхода:"
+        sent = await context.bot.send_message(chat_id, prompt_text)
         context.user_data["exp_edit"] = {
             "expense_id": expense_id,
             "chat_id": chat_id,
-            "message_id": message_id,
             "field": field,
             "user_id": user_id,
+            "prompt_message_id": sent.message_id,
         }
-        if field == "amount":
-            await query.message.reply_text("✏️ Напишите новую сумму (одним числом):")
-        else:
-            await query.message.reply_text("✏️ Напишите новое название расхода:")
         return
 
     if action == "exp_del":
         expense = db.get_expense_by_id(expense_id, chat_id)
         if not expense:
-            await query.edit_message_text("❌ Расход не найден.")
+            await context.bot.send_message(chat_id, "❌ Расход не найден.", parse_mode="HTML")
             return
         expense_owner_id = expense[1]
         can_delete = (
@@ -1079,23 +1128,24 @@ async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_
             or expense_owner_id == user_id
         )
         if not can_delete:
-            await query.answer("❌ Нельзя удалить чужой расход.", show_alert=True)
+            await context.bot.send_message(chat_id, "❌ Нельзя удалить чужой расход.", parse_mode="HTML")
             return
         deleted = db.delete_expense(
             expense_id, chat_id, user_id if expense_owner_id == user_id else None, force=(expense_owner_id != user_id)
         )
         if deleted:
             amount, desc = expense[3], expense[4]
-            await query.edit_message_text(
-                f"🗑 Расход удалён\n💸 {amount:.2f} сом — {escape(desc)}",
+            await context.bot.send_message(
+                chat_id,
+                f"🗑 Удалено. {amount:.2f} сом — {escape(desc)}",
                 parse_mode="HTML",
             )
         else:
-            await query.answer("❌ Не удалось удалить.", show_alert=True)
+            await context.bot.send_message(chat_id, "❌ Не удалось удалить.", parse_mode="HTML")
 
 
 async def handle_expense_edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка следующего сообщения после нажатия «Изменить сумму» или «Изменить название»"""
+    """После ввода новой суммы/названия: удаляем служебные сообщения и отправляем только итог «Изменено»."""
     if not update.message or not update.message.text:
         return
     exp_edit = context.user_data.get("exp_edit")
@@ -1105,17 +1155,18 @@ async def handle_expense_edit_message(update: Update, context: ContextTypes.DEFA
         return
     expense_id = exp_edit["expense_id"]
     chat_id = exp_edit["chat_id"]
-    edit_message_id = exp_edit["message_id"]
+    prompt_message_id = exp_edit.get("prompt_message_id")
     field = exp_edit["field"]
     text = update.message.text.strip()
+    user_msg_id = update.message.message_id
     del context.user_data["exp_edit"]
 
     expense = db.get_expense_by_id(expense_id, chat_id)
     if not expense:
-        await update.message.reply_text("❌ Расход не найден.")
+        await _delete_messages_safe(context, chat_id, prompt_message_id, user_msg_id)
+        await context.bot.send_message(chat_id, "❌ Расход не найден.", parse_mode="HTML")
         return
     _, _, username, amount, description, _, _, date_str = expense
-    date_obj = parse_db_datetime(date_str)
 
     if field == "amount":
         amount_match = re.search(r"(\d+(?:[.,]\d+)?)", text)
@@ -1128,43 +1179,31 @@ async def handle_expense_edit_message(update: Update, context: ContextTypes.DEFA
             await update.message.reply_text("❌ Неверный формат суммы.")
             return
         if not db.update_expense_amount(expense_id, chat_id, new_amount):
-            await update.message.reply_text("❌ Не удалось обновить сумму.")
+            await _delete_messages_safe(context, chat_id, prompt_message_id, user_msg_id)
+            await context.bot.send_message(chat_id, "❌ Не удалось обновить сумму.", parse_mode="HTML")
             return
-        new_text = (
-            f"✅ Расход (ID: {expense_id})\n"
-            f"💸 {new_amount:.2f} сом — {escape(description)}\n"
-            f"👤 {escape(username)} | {date_obj.strftime('%d.%m.%Y %H:%M')}\n\n"
-            "✅ Подтверждено"
+        await _delete_messages_safe(context, chat_id, prompt_message_id, user_msg_id)
+        await context.bot.send_message(
+            chat_id,
+            f"✅ Изменено. Расход ID {expense_id} — {new_amount:.2f} сом — {escape(description)}",
+            parse_mode="HTML",
         )
-        await update.message.reply_text("✅ Сумма обновлена.")
     else:
         if not text or len(text) > 500:
             await update.message.reply_text("❌ Название не может быть пустым или длиннее 500 символов.")
             return
         if not db.update_expense_description(expense_id, chat_id, text):
-            await update.message.reply_text("❌ Не удалось обновить название.")
+            await _delete_messages_safe(context, chat_id, prompt_message_id, user_msg_id)
+            await context.bot.send_message(chat_id, "❌ Не удалось обновить название.", parse_mode="HTML")
             return
-        new_text = (
-            f"✅ Расход (ID: {expense_id})\n"
-            f"💸 {amount:.2f} сом — {escape(text)}\n"
-            f"👤 {escape(username)} | {date_obj.strftime('%d.%m.%Y %H:%M')}\n\n"
-            "✅ Подтверждено"
-        )
-        await update.message.reply_text("✅ Название обновлено.")
-
-    # Чтобы то же сообщение не обработалось как новый расход
-    context.user_data["_last_edit_message_id"] = update.message.message_id
-
-    try:
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=edit_message_id,
-            text=new_text,
-            reply_markup=_expense_actions_keyboard(expense_id),
+        await _delete_messages_safe(context, chat_id, prompt_message_id, user_msg_id)
+        await context.bot.send_message(
+            chat_id,
+            f"✅ Изменено. Расход ID {expense_id} — {amount:.2f} сом — {escape(text)}",
             parse_mode="HTML",
         )
-    except Exception as e:
-        logger.debug(f"Не удалось отредактировать сообщение расхода: {e}")
+
+    context.user_data["_last_edit_message_id"] = user_msg_id
 
 
 async def delete_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1175,8 +1214,9 @@ async def delete_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Пример: /delete 5\n\n"
             "ID можно найти в списке расходов (команда /expenses)"
         )
+        await _delete_command_message(update)
         return
-    
+
     try:
         expense_id = int(context.args[0])
         chat_id = update.message.chat.id
@@ -1186,8 +1226,9 @@ async def delete_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         expense = db.get_expense_by_id(expense_id, chat_id)
         if not expense:
             await update.message.reply_text(f"❌ Расход с ID {expense_id} не найден")
+            await _delete_command_message(update)
             return
-        
+
         expense_owner_id = expense[1]  # user_id владельца расхода
         
         # Проверяем роль пользователя
@@ -1202,8 +1243,9 @@ async def delete_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ Вы можете удалять только свои расходы.\n"
                 f"Только администраторы и шефы могут удалять чужие расходы."
             )
+            await _delete_command_message(update)
             return
-        
+
         # Удаляем расход (если администратор/шеф - без проверки user_id, иначе - с проверкой)
         deleted = db.delete_expense(
             expense_id, 
@@ -1228,16 +1270,20 @@ async def delete_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"✅ Расход удален:\n"
                     f"💸 {expense_amount:.2f} сом - {expense_desc}"
                 )
+            await _delete_command_message(update)
         else:
             await update.message.reply_text(
                 f"❌ Не удалось удалить расход.\n"
                 f"Возможно, расход уже был удален или произошла ошибка."
             )
+            await _delete_command_message(update)
     except ValueError:
         await update.message.reply_text("❌ ID должен быть числом")
+        await _delete_command_message(update)
     except Exception as e:
         logger.error(f"Ошибка при удалении расхода: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Ошибка при удалении: {e}")
+        await _delete_command_message(update)
 
 
 async def export_today_pm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1263,6 +1309,7 @@ async def export_today_pm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Команду ожидаем именно из группы/супергруппы
     if chat_type not in ["group", "supergroup"]:
         await update.message.reply_text("❌ Эту команду нужно вызывать в группе, где ведётся учёт расходов.")
+        await _delete_command_message(update)
         return
 
     # Проверяем роль (как в /setrole и /delete)
@@ -1274,9 +1321,11 @@ async def export_today_pm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             member = await context.bot.get_chat_member(chat_id, issuer_id)
             if member.status not in ["administrator", "creator"]:
                 await update.message.reply_text("❌ Только администраторы и шефы могут делать выгрузку расходов")
+                await _delete_command_message(update)
                 return
         except Exception:
             await update.message.reply_text("❌ Только администраторы и шефы могут делать выгрузку расходов")
+            await _delete_command_message(update)
             return
 
     # Опциональный фильтр по username (@username)
@@ -1323,6 +1372,7 @@ async def export_today_pm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"📭 Нет расходов за выбранный период для пользователя @{target_username}.")
         else:
             await update.message.reply_text("📭 Нет расходов за выбранный период.")
+        await _delete_command_message(update)
         return
 
     # Формируем строки для TXT
@@ -1364,12 +1414,14 @@ async def export_today_pm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption=caption,
         )
         await update.message.reply_text("✅ Выгрузка отправлена вам в личные сообщения.")
+        await _delete_command_message(update)
     except Exception as e:
         logger.error(f"Ошибка при отправке выгрузки в личку: {e}", exc_info=True)
         await update.message.reply_text(
             "❌ Не удалось отправить файл в личку.\n"
             "Убедитесь, что вы писали боту в личные сообщения (нажмите /start в личке с ботом)."
         )
+        await _delete_command_message(update)
 
 
 async def set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1412,6 +1464,7 @@ async def set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 Текущий суточный лимит: {current_limit:.2f} сом\n"
             f"(Лимит по умолчанию: {DAILY_EXPENSE_LIMIT:.2f} сом)"
         )
+        await _delete_command_message(update)
         return
 
     arg = context.args[0].strip().lower()
@@ -1423,9 +1476,11 @@ async def set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"✅ Лимит сброшен. Теперь используется лимит по умолчанию: {DAILY_EXPENSE_LIMIT:.2f} сом"
             )
+            await _delete_command_message(update)
         except Exception as e:
             logger.error(f"Ошибка при сбросе дневного лимита: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Ошибка при сбросе лимита: {e}")
+            await _delete_command_message(update)
         return
 
     # Пытаемся распарсить число
@@ -1434,6 +1489,7 @@ async def set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         limit_value = float(raw_value)
         if limit_value <= 0:
             await update.message.reply_text("❌ Лимит должен быть положительным числом")
+            await _delete_command_message(update)
             return
     except ValueError:
         await update.message.reply_text(
@@ -1443,6 +1499,7 @@ async def set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/limit 250000.50\n"
             "/limit off  — сбросить лимит к значению по умолчанию"
         )
+        await _delete_command_message(update)
         return
 
     # Сохраняем лимит в БД
@@ -1451,9 +1508,11 @@ async def set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Лимит обновлён: {limit_value:.2f} сом"
         )
+        await _delete_command_message(update)
     except Exception as e:
         logger.error(f"Ошибка при установке дневного лимита: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Ошибка при установке лимита: {e}")
+        await _delete_command_message(update)
 
 
 def main():
