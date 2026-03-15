@@ -283,24 +283,28 @@ async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.args:
             role_parts = context.args
     elif update.message.entities:
-        # Ищем упоминания в сообщении
-        text = update.message.text or ""
-        
+        # Ищем упоминания в сообщении (parse_entity учитывает UTF-16 offset/length в Telegram)
+        msg = update.message
+        text = msg.text or ""
+
         for entity in update.message.entities:
             if entity.type == "text_mention":
                 target_user = entity.user
-                # Роль - это все аргументы, убираем упоминание
-                mention_text = text[entity.offset:entity.offset+entity.length]
+                try:
+                    mention_text = msg.parse_entity(entity) or text[entity.offset : entity.offset + entity.length]
+                except Exception:
+                    mention_text = text[entity.offset : entity.offset + entity.length]
                 if context.args:
                     args_text = " ".join(context.args)
                     role_text = args_text.replace(mention_text, "").strip()
                     role_parts = role_text.split() if role_text else []
                 break
             elif entity.type == "mention":
-                # Обычное упоминание @username
-                mention_text = text[entity.offset:entity.offset+entity.length]
-                mention_username = mention_text[1:]  # Убираем @
-                # Роль - это все аргументы после упоминания
+                try:
+                    mention_text = msg.parse_entity(entity) or ""
+                except Exception:
+                    mention_text = text[entity.offset : entity.offset + entity.length] if entity.offset is not None else ""
+                mention_username = (mention_text or "").lstrip("@")
                 if context.args:
                     args_text = " ".join(context.args)
                     role_text = args_text.replace(mention_text, "").strip()
@@ -433,24 +437,28 @@ async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.args:
             name_parts = [arg for arg in context.args if not arg.startswith('@')]
     elif update.message.entities:
-        # Ищем упоминания в сообщении
-        text = update.message.text or ""
-        
+        # Ищем упоминания в сообщении (parse_entity учитывает UTF-16 offset/length в Telegram)
+        msg = update.message
+        text = msg.text or ""
+
         for entity in update.message.entities:
             if entity.type == "text_mention":
                 target_user = entity.user
-                # Имя - это все аргументы, убираем упоминание
-                mention_text = text[entity.offset:entity.offset+entity.length]
+                try:
+                    mention_text = msg.parse_entity(entity) or text[entity.offset : entity.offset + entity.length]
+                except Exception:
+                    mention_text = text[entity.offset : entity.offset + entity.length]
                 if context.args:
                     args_text = " ".join(context.args)
                     name_text = args_text.replace(mention_text, "").strip()
                     name_parts = name_text.split() if name_text else []
                 break
             elif entity.type == "mention":
-                # Обычное упоминание @username
-                mention_text = text[entity.offset:entity.offset+entity.length]
-                mention_username = mention_text[1:]  # Убираем @
-                # Имя - это все аргументы после упоминания
+                try:
+                    mention_text = msg.parse_entity(entity) or ""
+                except Exception:
+                    mention_text = text[entity.offset : entity.offset + entity.length] if entity.offset is not None else ""
+                mention_username = (mention_text or "").lstrip("@")
                 if context.args:
                     args_text = " ".join(context.args)
                     name_text = args_text.replace(mention_text, "").strip()
@@ -557,9 +565,13 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 target_user = entity.user
                 break
             if entity.type == "mention":
-                text = update.message.text or ""
-                mention_text = text[entity.offset : entity.offset + entity.length]
-                mention_username = mention_text.lstrip("@")
+                msg = update.message
+                try:
+                    mention_text = msg.parse_entity(entity) or ""
+                except Exception:
+                    text = msg.text or ""
+                    mention_text = text[entity.offset : entity.offset + entity.length] if entity.offset is not None else ""
+                mention_username = (mention_text or "").lstrip("@")
                 if mention_username:
                     uid = db.get_user_id_by_username(chat_id, mention_username)
                     if uid:
@@ -655,6 +667,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Проверяем, что это сообщение в группе или супергруппе
         if chat_type not in ['group', 'supergroup']:
             logger.debug(f"Сообщение не из группы: {chat_type}")
+            return
+        
+        # Если ожидается ввод для редактирования расхода (сумма/название) — обрабатываем первым
+        if update.message.text and context.user_data.get("exp_edit"):
+            await handle_expense_edit_message(update, context)
             return
         
         # Не обрабатывать сообщение, которое было ответом для редактирования расхода
@@ -1533,14 +1550,8 @@ def main():
     # Инлайн-кнопки расходов: подтвердить, изменить сумму/название, удалить
     application.add_handler(CallbackQueryHandler(handle_expense_callback, pattern="^exp_"))
     
-    # Сообщение с новой суммой/названием после нажатия «Изменить сумму»/«Изменить название»
-    application.add_handler(
-        MessageHandler(filters.ChatType.GROUPS & filters.TEXT, handle_expense_edit_message)
-    )
-    
-    # Обработчик всех текстовых сообщений (включая ответы)
-    # Обрабатываем сообщения с текстом или ответы на сообщения
-    # Убираем фильтр COMMAND, чтобы обрабатывать все сообщения в группах
+    # Обработчик текстовых сообщений в группах: сначала проверка на редактирование расхода (exp_edit),
+    # затем добавление расхода (ответ с упоминанием бота). Один обработчик — чтобы ответы с расходами не перехватывались.
     message_filter = filters.ChatType.GROUPS & (filters.TEXT | filters.REPLY)
     application.add_handler(MessageHandler(message_filter, handle_message))
     
