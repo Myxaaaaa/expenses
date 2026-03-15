@@ -12,9 +12,9 @@ from datetime import datetime, timedelta
 from html import escape
 from dateutil import parser as date_parser
 from dateutil import tz
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import NetworkError, TimedOut, Conflict
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 from database import Database
 from typing import Optional
@@ -307,6 +307,15 @@ async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     role_parts = role_text.split() if role_text else []
                 break
     
+    # Fallback: тег @username в аргументах команды (если entities не распарсились)
+    if not mention_username and context.args:
+        for arg in context.args:
+            if arg.startswith("@"):
+                mention_username = arg.lstrip("@").strip()
+                if not role_parts and context.args:
+                    role_parts = [a for a in context.args if not a.startswith("@")]
+                break
+
     # Если нашли упоминание @username, пытаемся найти пользователя
     if not target_user and mention_username:
         # Сначала пробуем найти в базе данных
@@ -340,12 +349,12 @@ async def set_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ Не удалось найти пользователя @{mention_username}\n\n"
                 "💡 Попробуйте:\n"
                 "• Ответить на сообщение пользователя и написать /setrole роль\n"
-                "• Убедитесь, что пользователь есть в группе\n"
+                "• Убедитесь, что пользователь есть в группе и бот — администратор\n"
                 "• Если пользователь уже был добавлен ранее, попробуйте снова"
             )
         else:
             await update.message.reply_text(
-                "↩️ Ответьте на сообщение участника или укажите тег, чтобы назначить роль\n"
+                "↩️ Ответьте на сообщение участника или укажите тег @username, чтобы назначить роль\n"
                 "Примеры:\n"
                 "• /setrole оператор (в ответ на сообщение)\n"
                 "• /setrole @username оператор"
@@ -448,6 +457,15 @@ async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     name_parts = name_text.split() if name_text else []
                 break
     
+    # Fallback: тег @username в аргументах команды (для /setname)
+    if not mention_username and context.args:
+        for arg in context.args:
+            if arg.startswith("@"):
+                mention_username = arg.lstrip("@").strip()
+                if not name_parts and context.args:
+                    name_parts = [a for a in context.args if not a.startswith("@")]
+                break
+
     # Если нашли упоминание @username, пытаемся найти пользователя
     if not target_user and mention_username:
         # Сначала пробуем найти в базе данных
@@ -481,12 +499,12 @@ async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ Не удалось найти пользователя @{mention_username}\n\n"
                 "💡 Попробуйте:\n"
                 "• Ответить на сообщение пользователя и написать /setname Имя\n"
-                "• Убедитесь, что пользователь есть в группе\n"
+                "• Убедитесь, что пользователь есть в группе и бот — администратор\n"
                 "• Если пользователь уже был добавлен ранее, попробуйте снова"
             )
         else:
             await update.message.reply_text(
-                "↩️ Ответьте на сообщение участника или укажите тег, чтобы установить имя\n"
+                "↩️ Ответьте на сообщение участника или укажите тег @username\n"
                 "Примеры:\n"
                 "• /setname Иван (в ответ на сообщение)\n"
                 "• /setname @username Иван"
@@ -534,11 +552,45 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.reply_to_message:
         target_user = update.message.reply_to_message.from_user
     elif update.message.entities:
-        # Ищем упоминания в сообщении
         for entity in update.message.entities:
             if entity.type == "text_mention":
                 target_user = entity.user
                 break
+            if entity.type == "mention":
+                text = update.message.text or ""
+                mention_text = text[entity.offset : entity.offset + entity.length]
+                mention_username = mention_text.lstrip("@")
+                if mention_username:
+                    uid = db.get_user_id_by_username(chat_id, mention_username)
+                    if uid:
+                        try:
+                            member = await context.bot.get_chat_member(chat_id, uid)
+                            target_user = member.user
+                        except Exception:
+                            pass
+                    if not target_user and mention_username:
+                        try:
+                            member = await context.bot.get_chat_member(chat_id, mention_username)
+                            target_user = member.user
+                        except Exception:
+                            pass
+                break
+    if not target_user and context.args and context.args[0].startswith("@"):
+        mention_username = context.args[0].lstrip("@").strip()
+        if mention_username:
+            uid = db.get_user_id_by_username(chat_id, mention_username)
+            if uid:
+                try:
+                    member = await context.bot.get_chat_member(chat_id, uid)
+                    target_user = member.user
+                except Exception:
+                    pass
+            if not target_user:
+                try:
+                    member = await context.bot.get_chat_member(chat_id, mention_username)
+                    target_user = member.user
+                except Exception:
+                    pass
     
     if target_user:
         # Информация о конкретном пользователе
@@ -605,6 +657,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.debug(f"Сообщение не из группы: {chat_type}")
             return
         
+        # Не обрабатывать сообщение, которое было ответом для редактирования расхода
+        if update.message.message_id == context.user_data.pop("_last_edit_message_id", None):
+            return
         # Сообщение должно быть ответом
         if not update.message.reply_to_message:
             logger.debug("Сообщение не является ответом — пропускаем")
@@ -703,15 +758,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Отправляем подтверждение
+        # Отправляем подтверждение с ID и инлайн-кнопками
         reply_text = (
-            f"✅ Расход добавлен: {amount:.2f} сом - {description}\n"
+            f"✅ Расход добавлен (ID: {expense_id})\n"
+            f"💸 {amount:.2f} сом — {escape(description)}\n"
             f"📎 Ответ на сообщение #{original_message_id}"
         )
-        
+        confirm_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Подтвердить", callback_data=f"exp_confirm:{expense_id}")]
+        ])
         await update.message.reply_text(
             reply_text,
-            reply_to_message_id=update.message.message_id
+            reply_to_message_id=update.message.message_id,
+            reply_markup=confirm_keyboard,
+            parse_mode="HTML"
         )
 
         # Если при добавлении этого расхода суточный лимит был превышен — отправляем предупреждение в группу
@@ -921,6 +981,173 @@ async def expenses_period(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_expenses(update, context, start_date=start_date, end_date=end_date)
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка парсинга даты: {e}")
+
+
+def _expense_actions_keyboard(expense_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура после подтверждения: изменить сумму, название, удалить"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💵 Изменить сумму", callback_data=f"exp_amt:{expense_id}"),
+            InlineKeyboardButton("📝 Изменить название", callback_data=f"exp_name:{expense_id}"),
+        ],
+        [InlineKeyboardButton("🗑 Удалить расход", callback_data=f"exp_del:{expense_id}")],
+    ])
+
+
+async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатий инлайн-кнопок у расходов: подтвердить, изменить сумму/название, удалить"""
+    query = update.callback_query
+    await query.answer()
+    if not query.data or not query.data.startswith("exp_"):
+        return
+    parts = query.data.split(":", 1)
+    if len(parts) != 2:
+        return
+    action, expense_id_str = parts[0], parts[1]
+    try:
+        expense_id = int(expense_id_str)
+    except ValueError:
+        return
+    chat_id = query.message.chat.id
+    message_id = query.message.message_id
+    user_id = query.from_user.id if query.from_user else None
+
+    if action == "exp_confirm":
+        expense = db.get_expense_by_id(expense_id, chat_id)
+        if not expense:
+            await query.edit_message_text("❌ Расход не найден.")
+            return
+        _, _, username, amount, description, _, _, date_str = expense
+        date_obj = parse_db_datetime(date_str)
+        new_text = (
+            f"✅ Расход (ID: {expense_id})\n"
+            f"💸 {amount:.2f} сом — {escape(description)}\n"
+            f"👤 {escape(username)} | {date_obj.strftime('%d.%m.%Y %H:%M')}\n\n"
+            "✅ Подтверждено"
+        )
+        await query.edit_message_text(
+            new_text,
+            reply_markup=_expense_actions_keyboard(expense_id),
+            parse_mode="HTML",
+        )
+        return
+
+    if action in ("exp_amt", "exp_name"):
+        expense = db.get_expense_by_id(expense_id, chat_id)
+        if not expense:
+            await query.answer("❌ Расход не найден.", show_alert=True)
+            return
+        field = "amount" if action == "exp_amt" else "description"
+        context.user_data["exp_edit"] = {
+            "expense_id": expense_id,
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "field": field,
+            "user_id": user_id,
+        }
+        if field == "amount":
+            await query.message.reply_text("✏️ Напишите новую сумму (одним числом):")
+        else:
+            await query.message.reply_text("✏️ Напишите новое название расхода:")
+        return
+
+    if action == "exp_del":
+        expense = db.get_expense_by_id(expense_id, chat_id)
+        if not expense:
+            await query.edit_message_text("❌ Расход не найден.")
+            return
+        expense_owner_id = expense[1]
+        can_delete = (
+            get_user_role_from_db(chat_id, user_id) in ["администратор", "шеф"]
+            or expense_owner_id == user_id
+        )
+        if not can_delete:
+            await query.answer("❌ Нельзя удалить чужой расход.", show_alert=True)
+            return
+        deleted = db.delete_expense(
+            expense_id, chat_id, user_id if expense_owner_id == user_id else None, force=(expense_owner_id != user_id)
+        )
+        if deleted:
+            amount, desc = expense[3], expense[4]
+            await query.edit_message_text(
+                f"🗑 Расход удалён\n💸 {amount:.2f} сом — {escape(desc)}",
+                parse_mode="HTML",
+            )
+        else:
+            await query.answer("❌ Не удалось удалить.", show_alert=True)
+
+
+async def handle_expense_edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка следующего сообщения после нажатия «Изменить сумму» или «Изменить название»"""
+    if not update.message or not update.message.text:
+        return
+    exp_edit = context.user_data.get("exp_edit")
+    if not exp_edit:
+        return
+    if exp_edit.get("chat_id") != update.message.chat.id or exp_edit.get("user_id") != update.message.from_user.id:
+        return
+    expense_id = exp_edit["expense_id"]
+    chat_id = exp_edit["chat_id"]
+    edit_message_id = exp_edit["message_id"]
+    field = exp_edit["field"]
+    text = update.message.text.strip()
+    del context.user_data["exp_edit"]
+
+    expense = db.get_expense_by_id(expense_id, chat_id)
+    if not expense:
+        await update.message.reply_text("❌ Расход не найден.")
+        return
+    _, _, username, amount, description, _, _, date_str = expense
+    date_obj = parse_db_datetime(date_str)
+
+    if field == "amount":
+        amount_match = re.search(r"(\d+(?:[.,]\d+)?)", text)
+        if not amount_match:
+            await update.message.reply_text("❌ Не удалось распознать число. Напишите сумму, например: 1500")
+            return
+        try:
+            new_amount = float(amount_match.group(1).replace(",", "."))
+        except ValueError:
+            await update.message.reply_text("❌ Неверный формат суммы.")
+            return
+        if not db.update_expense_amount(expense_id, chat_id, new_amount):
+            await update.message.reply_text("❌ Не удалось обновить сумму.")
+            return
+        new_text = (
+            f"✅ Расход (ID: {expense_id})\n"
+            f"💸 {new_amount:.2f} сом — {escape(description)}\n"
+            f"👤 {escape(username)} | {date_obj.strftime('%d.%m.%Y %H:%M')}\n\n"
+            "✅ Подтверждено"
+        )
+        await update.message.reply_text("✅ Сумма обновлена.")
+    else:
+        if not text or len(text) > 500:
+            await update.message.reply_text("❌ Название не может быть пустым или длиннее 500 символов.")
+            return
+        if not db.update_expense_description(expense_id, chat_id, text):
+            await update.message.reply_text("❌ Не удалось обновить название.")
+            return
+        new_text = (
+            f"✅ Расход (ID: {expense_id})\n"
+            f"💸 {amount:.2f} сом — {escape(text)}\n"
+            f"👤 {escape(username)} | {date_obj.strftime('%d.%m.%Y %H:%M')}\n\n"
+            "✅ Подтверждено"
+        )
+        await update.message.reply_text("✅ Название обновлено.")
+
+    # Чтобы то же сообщение не обработалось как новый расход
+    context.user_data["_last_edit_message_id"] = update.message.message_id
+
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=edit_message_id,
+            text=new_text,
+            reply_markup=_expense_actions_keyboard(expense_id),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.debug(f"Не удалось отредактировать сообщение расхода: {e}")
 
 
 async def delete_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1302,6 +1529,14 @@ def main():
     application.add_handler(CommandHandler("export_today_pm", export_today_pm))
     application.add_handler(CommandHandler("export_week_pm", export_today_pm))
     application.add_handler(CommandHandler("export_month_pm", export_today_pm))
+    
+    # Инлайн-кнопки расходов: подтвердить, изменить сумму/название, удалить
+    application.add_handler(CallbackQueryHandler(handle_expense_callback, pattern="^exp_"))
+    
+    # Сообщение с новой суммой/названием после нажатия «Изменить сумму»/«Изменить название»
+    application.add_handler(
+        MessageHandler(filters.ChatType.GROUPS & filters.TEXT, handle_expense_edit_message)
+    )
     
     # Обработчик всех текстовых сообщений (включая ответы)
     # Обрабатываем сообщения с текстом или ответы на сообщения

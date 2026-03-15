@@ -476,3 +476,39 @@ class PostgresDatabase:
             row["date"],
         )
 
+    def update_expense_amount(
+        self, expense_id: int, chat_id: int, amount: float
+    ) -> bool:
+        conn = self.get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE expenses
+            SET amount = %s
+            WHERE id = %s AND chat_id = %s;
+            """,
+            (amount, expense_id, chat_id),
+        )
+        updated = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        return updated
+
+    def update_expense_description(
+        self, expense_id: int, chat_id: int, description: str
+    ) -> bool:
+        conn = self.get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE expenses
+            SET description = %s
+            WHERE id = %s AND chat_id = %s;
+            """,
+            (description, expense_id, chat_id),
+        )
+        updated = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        return updated
+

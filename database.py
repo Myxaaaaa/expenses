@@ -404,21 +404,46 @@ class Database:
         conn.close()
         return result
 
-        def get_expenses_by_ids(self, expense_ids: list, chat_id: int) -> list:
-            """Получает список расходов по их ID"""
-            if not expense_ids:
-                return []
-            conn = self.get_connection()
-            cursor = conn.cursor()
+    def update_expense_amount(self, expense_id: int, chat_id: int, amount: float) -> bool:
+        """Обновляет сумму расхода"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE expenses SET amount = ? WHERE id = ? AND chat_id = ?",
+            (amount, expense_id, chat_id),
+        )
+        updated = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return updated
 
-            placeholders = ','.join(['?'] * len(expense_ids))
-            query = f"""
-                SELECT id, user_id, username, amount, description, category, message_id, date
-                FROM expenses
-                WHERE id IN ({placeholders}) AND chat_id = ?
-            """
-            params = expense_ids + [chat_id]
-            cursor.execute(query, params)
-            results = cursor.fetchall()
-            conn.close()
-            return results
+    def update_expense_description(self, expense_id: int, chat_id: int, description: str) -> bool:
+        """Обновляет описание расхода"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE expenses SET description = ? WHERE id = ? AND chat_id = ?",
+            (description, expense_id, chat_id),
+        )
+        updated = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return updated
+
+    def get_expenses_by_ids(self, expense_ids: list, chat_id: int) -> list:
+        """Получает список расходов по их ID"""
+        if not expense_ids:
+            return []
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        placeholders = ','.join(['?'] * len(expense_ids))
+        query = f"""
+            SELECT id, user_id, username, amount, description, category, message_id, date
+            FROM expenses
+            WHERE id IN ({placeholders}) AND chat_id = ?
+        """
+        params = expense_ids + [chat_id]
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        conn.close()
+        return results
