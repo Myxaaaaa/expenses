@@ -4,6 +4,7 @@ import logging
 import sys
 import socket
 import time
+import uuid
 import signal
 import atexit
 import io
@@ -120,7 +121,15 @@ def parse_expense(text: str, bot_username: str = None) -> tuple:
         return None, None
     
 
-    description = re.sub(r'\d+(?:[.,]\d+)?\s*(?:руб|р|₽)?\s*[-на]?\s*', '', text, flags=re.IGNORECASE)
+    # Удаляем только префикс формата "1000", "1000 руб", "1000 -", "1000 на"
+    # Важно: не использовать символьный класс вроде [-на], чтобы не "съедать"
+    # первую букву описания (например, "аванс" -> "ванс").
+    description = re.sub(
+        r'^\s*\d+(?:[.,]\d+)?\s*(?:руб|р|₽)?\s*(?:(?:-\s*)|(?:на\s+))?',
+        '',
+        text,
+        flags=re.IGNORECASE,
+    )
     description = description.strip()
     
     if not description:
@@ -891,10 +900,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["pending_expense_add"] = {
                 "chat_id": update.message.chat.id,
                 "user_id": update.message.from_user.id,
+                "username": update.message.from_user.username or update.message.from_user.first_name or "Неизвестный",
                 "amount": amount,
                 "description": description,
                 "suggestions": suggestions,
                 "message_id": update.message.message_id,
+                "original_message_id": update.message.reply_to_message.message_id if update.message.reply_to_message else None,
             }
             keyboard = _expense_name_suggestions_keyboard(description, suggestions)
             await update.message.reply_text(
@@ -946,16 +957,18 @@ async def show_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if is_single_day_period:
         grouped = {}
         for expense in expenses:
-            _, _, _, amount, description, _, _, _ = expense
+            expense_id, _, _, amount, description, _, _, _ = expense
             key = normalize_description(description)
             if key not in grouped:
                 grouped[key] = {
                     "description": (description or "Без описания").strip() or "Без описания",
                     "amount": 0.0,
                     "count": 0,
+                    "expense_ids": [],
                 }
             grouped[key]["amount"] += float(amount or 0)
             grouped[key]["count"] += 1
+            grouped[key]["expense_ids"].append(int(expense_id))
 
         grouped_items = sorted(grouped.values(), key=lambda item: item["amount"], reverse=True)
         header = (
@@ -966,11 +979,19 @@ async def show_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE,
         message_parts.append(escape(header))
         for item in grouped_items:
             suffix = f" ({item['count']} шт.)" if item["count"] > 1 else ""
+            ids_text = ", ".join(str(exp_id) for exp_id in item["expense_ids"])
             message_parts.append(
                 f"💸 {item['amount']:.2f} сом - {escape(item['description'])}{suffix}\n"
+                f"🆔 ID: {ids_text}\n"
             )
         full_message = "\n".join(message_parts)
-        await update.message.reply_text(full_message, parse_mode='HTML')
+        token = uuid.uuid4().hex[:10]
+        context.chat_data.setdefault("grouped_expenses_views", {})[token] = {
+            "groups": grouped_items,
+            "created_at": int(time.time()),
+        }
+        keyboard = _grouped_expenses_keyboard(token, grouped_items)
+        await update.message.reply_text(full_message, parse_mode='HTML', reply_markup=keyboard)
         await _delete_command_message(update)
         return
 
@@ -1159,6 +1180,31 @@ def _expense_actions_keyboard(expense_id: int, user_msg_id: int = None) -> Inlin
     ])
 
 
+def _grouped_expenses_keyboard(token: str, grouped_items: list[dict]) -> Optional[InlineKeyboardMarkup]:
+    """Кнопки просмотра деталей сгруппированных расходов (только где 2+ записей)."""
+    rows = []
+    for idx, item in enumerate(grouped_items):
+        if item["count"] < 2:
+            continue
+        desc = item["description"]
+        short_desc = (desc[:18] + "...") if len(desc) > 19 else desc
+        rows.append([
+            InlineKeyboardButton(
+                f"📂 {short_desc} ({item['count']})",
+                callback_data=f"grp_day:{token}:{idx}",
+            )
+        ])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def _grouped_expense_ids_keyboard(expense_ids: list[int]) -> InlineKeyboardMarkup:
+    """Кнопки для открытия конкретных расходов из группы."""
+    rows = []
+    for expense_id in expense_ids:
+        rows.append([InlineKeyboardButton(f"🧾 Открыть ID {expense_id}", callback_data=f"grp_open:{expense_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _parse_expense_callback_data(data: str):
     """Парсит callback_data: exp_action:expense_id или exp_action:expense_id:user_msg_id. Возвращает (action, expense_id, user_msg_id)."""
     if not data or not data.startswith("exp_"):
@@ -1173,6 +1219,102 @@ def _parse_expense_callback_data(data: str):
     except ValueError:
         return None, None, None
     return action, expense_id, user_msg_id
+
+
+async def handle_grouped_expenses_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка кнопок детального просмотра сгруппированных расходов."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    data = query.data or ""
+
+    if data.startswith("grp_day:"):
+        parts = data.split(":")
+        if len(parts) != 3:
+            await query.answer("❌ Неверный формат кнопки", show_alert=True)
+            return
+        token = parts[1]
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await query.answer("❌ Неверный индекс группы", show_alert=True)
+            return
+
+        groups_map = context.chat_data.get("grouped_expenses_views", {})
+        payload = groups_map.get(token)
+        if not payload:
+            await query.answer("⌛ Список устарел. Запросите /expenses заново.", show_alert=True)
+            return
+
+        groups = payload.get("groups", [])
+        if idx < 0 or idx >= len(groups):
+            await query.answer("❌ Группа не найдена", show_alert=True)
+            return
+
+        group = groups[idx]
+        expense_ids = group.get("expense_ids", [])
+        if not expense_ids:
+            await query.answer("❌ Нет расходов в группе", show_alert=True)
+            return
+
+        lines = [
+            f"📂 {escape(group.get('description', 'Без описания'))}",
+            f"🧾 Записей: {len(expense_ids)}",
+            f"💵 Итого: {float(group.get('amount', 0)):.2f} сом",
+            "",
+            "Выберите расход:",
+        ]
+        for exp_id in expense_ids:
+            expense = db.get_expense_by_id(exp_id, query.message.chat.id)
+            if not expense:
+                continue
+            _, _, username, amount, description, _, _, date_str = expense
+            date_obj = parse_db_datetime(date_str)
+            lines.append(
+                f"• ID {exp_id} — {float(amount):.2f} сом | {escape(username)} | {date_obj.strftime('%H:%M')}"
+            )
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=_grouped_expense_ids_keyboard(expense_ids),
+        )
+        return
+
+    if data.startswith("grp_open:"):
+        parts = data.split(":")
+        if len(parts) != 2:
+            await query.answer("❌ Неверная кнопка", show_alert=True)
+            return
+        try:
+            expense_id = int(parts[1])
+        except ValueError:
+            await query.answer("❌ Неверный ID", show_alert=True)
+            return
+
+        expense = db.get_expense_by_id(expense_id, query.message.chat.id)
+        if not expense:
+            await query.answer("❌ Расход не найден", show_alert=True)
+            return
+
+        _, _, username, amount, description, _, message_id, date_str = expense
+        date_obj = parse_db_datetime(date_str)
+        if message_id:
+            chat_username = query.message.chat.username
+            message_link = build_message_link(query.message.chat.id, chat_username, message_id)
+            link_text = f'<a href="{message_link}">#{message_id}</a>'
+        else:
+            link_text = "-"
+
+        await query.edit_message_text(
+            f"🧾 Расход (ID: {expense_id})\n"
+            f"💸 {float(amount):.2f} сом — {escape(description)}\n"
+            f"👤 {escape(username)} | {date_obj.strftime('%d.%m.%Y %H:%M')} | {link_text}",
+            parse_mode="HTML",
+            reply_markup=_expense_actions_keyboard(expense_id),
+        )
+        return
 
 
 async def _delete_messages_safe(context, chat_id: int, *message_ids: int):
@@ -1232,19 +1374,83 @@ async def handle_expense_suggestion_callback(update: Update, context: ContextTyp
     except Exception:
         pass
 
-    fake_update = Update(update.update_id, message=query.message.reply_to_message)
-    if not fake_update.message:
-        context.user_data.pop("pending_expense_add", None)
-        return
+    # Сохраняем расход напрямую из pending, не полагаясь на reply_to_message в callback.
+    try:
+        chat_id = int(pending.get("chat_id"))
+        user_id = int(pending.get("user_id"))
+        username = str(pending.get("username") or "Неизвестный")
+        amount = float(pending.get("amount", 0))
+        user_msg_id = int(pending.get("message_id"))
+        original_message_id = pending.get("original_message_id")
+        if original_message_id is not None:
+            original_message_id = int(original_message_id)
+        current_time = get_bishkek_now()
+        daily_limit = get_chat_daily_limit(chat_id)
+        today_start = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = current_time.replace(hour=23, minute=59, second=59, microsecond=999999)
+        previous_total_today = db.get_total_amount(
+            chat_id=chat_id,
+            start_date=today_start,
+            end_date=today_end
+        )
+        expense_id = db.add_expense(
+            chat_id=chat_id,
+            user_id=user_id,
+            username=username,
+            amount=amount,
+            description=final_description,
+            message_id=user_msg_id,
+            expense_date=current_time
+        )
+        new_total_today = (previous_total_today or 0) + amount
 
-    # Сохраняем расход от имени исходного сообщения с суммой из pending.
-    await finalize_expense_add(
-        fake_update,
-        context,
-        amount=float(pending.get("amount", 0)),
-        description=final_description,
-    )
-    context.user_data.pop("pending_expense_add", None)
+        record = {
+            "id": expense_id,
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "username": username,
+            "amount": amount,
+            "description": final_description,
+            "message_id": user_msg_id,
+            "original_message_id": original_message_id,
+            "created_at": current_time.isoformat(),
+        }
+        try:
+            with open(EXPENSES_JSONL_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as log_err:
+            logger.error(f"Не удалось записать расход в JSONL: {log_err}", exc_info=True)
+
+        reply_text = (
+            f"✅ Расход добавлен (ID: {expense_id})\n"
+            f"💸 {amount:.2f} сом — {escape(final_description)}\n"
+            f"📎 Ответ на сообщение #{original_message_id if original_message_id else '-'}"
+        )
+        confirm_keyboard = _expense_actions_keyboard(expense_id, user_msg_id)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=reply_text,
+            reply_to_message_id=user_msg_id,
+            reply_markup=confirm_keyboard,
+            parse_mode="HTML"
+        )
+
+        if new_total_today > daily_limit:
+            warning_text = (
+                "🚨 ПРЕВЫШЕН ДНЕВНОЙ ЛИМИТ ПО РАСХОДАМ!\n"
+                f"💵 Общая сумма за сегодня: {new_total_today:.2f} сом\n"
+                f"📊 Установленный лимит: {daily_limit:.2f} сом"
+            )
+            await context.bot.send_message(chat_id=chat_id, text=warning_text)
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении расхода через подсказку: {e}", exc_info=True)
+        await context.bot.send_message(
+            chat_id=query.message.chat.id,
+            text=f"❌ Ошибка при сохранении расхода: {e}",
+            reply_to_message_id=query.message.message_id if query.message else None
+        )
+    finally:
+        context.user_data.pop("pending_expense_add", None)
 
 
 async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1818,6 +2024,9 @@ def main():
     
     # Инлайн-кнопки подсказок названий при добавлении расхода
     application.add_handler(CallbackQueryHandler(handle_expense_suggestion_callback, pattern="^exp_suggest"))
+
+    # Кнопки просмотра сгруппированных расходов за день
+    application.add_handler(CallbackQueryHandler(handle_grouped_expenses_callback, pattern="^grp_"))
 
     # Инлайн-кнопки расходов: подтвердить, изменить сумму/название, удалить
     application.add_handler(CallbackQueryHandler(handle_expense_callback, pattern="^exp_"))
