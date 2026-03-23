@@ -8,6 +8,7 @@ import signal
 import atexit
 import io
 import json
+import difflib
 from datetime import datetime, timedelta
 from html import escape
 from dateutil import parser as date_parser
@@ -126,6 +127,149 @@ def parse_expense(text: str, bot_username: str = None) -> tuple:
         description = "Без описания"
     
     return amount, description
+
+
+def normalize_description(description: str) -> str:
+    """Нормализует описание расхода для сравнения и группировки."""
+    return re.sub(r"\s+", " ", (description or "").strip().lower())
+
+
+def find_similar_today_descriptions(
+    chat_id: int,
+    target_description: str,
+    start_date: datetime,
+    end_date: datetime,
+    max_suggestions: int = 3,
+) -> list[str]:
+    """Ищет максимально похожие названия расходов за текущий день."""
+    target_norm = normalize_description(target_description)
+    if not target_norm:
+        return []
+
+    expenses_today = db.get_expenses(chat_id, start_date, end_date)
+    unique_by_norm = {}
+    for exp in expenses_today:
+        original_desc = (exp[4] or "").strip()
+        norm_desc = normalize_description(original_desc)
+        if not norm_desc or norm_desc == target_norm:
+            continue
+        if norm_desc not in unique_by_norm:
+            unique_by_norm[norm_desc] = original_desc
+
+    scored = []
+    for norm_desc, original_desc in unique_by_norm.items():
+        similarity = difflib.SequenceMatcher(None, target_norm, norm_desc).ratio()
+        if similarity >= 0.78:
+            scored.append((similarity, original_desc))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [desc for _, desc in scored[:max_suggestions]]
+
+
+def _expense_name_suggestions_keyboard(
+    original_description: str,
+    suggestions: list[str],
+) -> InlineKeyboardMarkup:
+    """Клавиатура выбора названия расхода при добавлении."""
+    rows = []
+    for idx, suggested in enumerate(suggestions):
+        rows.append([
+            InlineKeyboardButton(
+                f"✅ {suggested}",
+                callback_data=f"exp_suggest_use:{idx}",
+            )
+        ])
+    rows.append([InlineKeyboardButton("✍️ Оставить как есть", callback_data="exp_suggest_keep")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="exp_suggest_cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def finalize_expense_add(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    amount: float,
+    description: str,
+) -> None:
+    """Финализирует добавление расхода и отправляет подтверждение."""
+    user = update.message.from_user
+    username = user.username or user.first_name or "Неизвестный"
+    original_message_id = update.message.reply_to_message.message_id
+
+    try:
+        current_time = get_bishkek_now()
+        daily_limit = get_chat_daily_limit(update.message.chat.id)
+        today_start = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = current_time.replace(hour=23, minute=59, second=59, microsecond=999999)
+        previous_total_today = db.get_total_amount(
+            chat_id=update.message.chat.id,
+            start_date=today_start,
+            end_date=today_end
+        )
+
+        expense_id = db.add_expense(
+            chat_id=update.message.chat.id,
+            user_id=user.id,
+            username=username,
+            amount=amount,
+            description=description,
+            message_id=update.message.message_id,
+            expense_date=current_time
+        )
+        logger.info(f"Расход добавлен в БД с ID: {expense_id}")
+        new_total_today = (previous_total_today or 0) + amount
+
+        record = {
+            "id": expense_id,
+            "chat_id": update.message.chat.id,
+            "user_id": user.id,
+            "username": username,
+            "amount": amount,
+            "description": description,
+            "message_id": update.message.message_id,
+            "original_message_id": original_message_id,
+            "created_at": current_time.isoformat(),
+        }
+        try:
+            with open(EXPENSES_JSONL_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as log_err:
+            logger.error(f"Не удалось записать расход в JSONL: {log_err}", exc_info=True)
+    except Exception as e:
+        logger.error(f"Ошибка при добавлении расхода в БД: {e}")
+        await update.message.reply_text(
+            f"❌ Ошибка при сохранении расхода: {e}",
+            reply_to_message_id=update.message.message_id
+        )
+        return
+
+    user_msg_id = update.message.message_id
+    reply_text = (
+        f"✅ Расход добавлен (ID: {expense_id})\n"
+        f"💸 {amount:.2f} сом — {escape(description)}\n"
+        f"📎 Ответ на сообщение #{original_message_id}"
+    )
+    confirm_keyboard = _expense_actions_keyboard(expense_id, user_msg_id)
+    await update.message.reply_text(
+        reply_text,
+        reply_to_message_id=user_msg_id,
+        reply_markup=confirm_keyboard,
+        parse_mode="HTML"
+    )
+
+    try:
+        if previous_total_today <= daily_limit and new_total_today > daily_limit:
+            warning_text = (
+                "🚨 ПРЕВЫШЕН ДНЕВНОЙ ЛИМИТ ПО РАСХОДАМ!\n"
+                f"💵 Общая сумма за сегодня: {new_total_today:.2f} сом\n"
+                f"📊 Установленный лимит: {daily_limit:.2f} сом"
+            )
+            await context.bot.send_message(
+                chat_id=update.message.chat.id,
+                text=warning_text
+            )
+    except Exception as warn_err:
+        logger.error(f"Ошибка при отправке предупреждения о превышении лимита: {warn_err}", exc_info=True)
 
 
 def parse_db_datetime(value):
@@ -732,103 +876,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         logger.info(f"Распарсен расход: {amount} - {description}")
-        
-        # Добавляем в базу данных
-        user = update.message.from_user
-        username = user.username or user.first_name or "Неизвестный"
-        
-        original_message_id = update.message.reply_to_message.message_id
-        
-        try:
-            # Используем текущее время в часовом поясе Бишкека
-            current_time = get_bishkek_now()
 
-            # Получаем суточный лимит для этого чата
-            daily_limit = get_chat_daily_limit(update.message.chat.id)
+        current_time = get_bishkek_now()
+        today_start = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = current_time.replace(hour=23, minute=59, second=59, microsecond=999999)
+        suggestions = find_similar_today_descriptions(
+            chat_id=update.message.chat.id,
+            target_description=description,
+            start_date=today_start,
+            end_date=today_end,
+        )
 
-            # Считаем сумму расходов за сегодня ДО добавления нового расхода
-            today_start = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
-            today_end = current_time.replace(hour=23, minute=59, second=59, microsecond=999999)
-            previous_total_today = db.get_total_amount(
-                chat_id=update.message.chat.id,
-                start_date=today_start,
-                end_date=today_end
-            )
-
-            expense_id = db.add_expense(
-                chat_id=update.message.chat.id,
-                user_id=user.id,
-                username=username,
-                amount=amount,
-                description=description,
-                message_id=update.message.message_id,
-                expense_date=current_time
-            )
-            logger.info(f"Расход добавлен в БД с ID: {expense_id}")
-
-            # Новая сумма за сегодня с учётом только что добавленного расхода
-            new_total_today = (previous_total_today or 0) + amount
-
-            # Дополнительно пишем в JSONL-файл на долговременное хранилище (том Railway)
-            record = {
-                "id": expense_id,
+        if suggestions:
+            context.user_data["pending_expense_add"] = {
                 "chat_id": update.message.chat.id,
-                "user_id": user.id,
-                "username": username,
+                "user_id": update.message.from_user.id,
                 "amount": amount,
                 "description": description,
+                "suggestions": suggestions,
                 "message_id": update.message.message_id,
-                "original_message_id": original_message_id,
-                "created_at": current_time.isoformat(),
             }
-            try:
-                with open(EXPENSES_JSONL_PATH, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            except Exception as log_err:
-                logger.error(f"Не удалось записать расход в JSONL: {log_err}", exc_info=True)
-        except Exception as e:
-            logger.error(f"Ошибка при добавлении расхода в БД: {e}")
+            keyboard = _expense_name_suggestions_keyboard(description, suggestions)
             await update.message.reply_text(
-                f"❌ Ошибка при сохранении расхода: {e}",
-                reply_to_message_id=update.message.message_id
+                "🔍 Нашёл похожие расходы за сегодня.\n"
+                "Выберите правильное название, чтобы расходы склеились в один пункт дня:",
+                reply_to_message_id=update.message.message_id,
+                reply_markup=keyboard,
             )
             return
-        
-        # Отправляем подтверждение с полным набором инлайн-кнопок (подтвердить, изменить, удалить)
-        user_msg_id = update.message.message_id
-        reply_text = (
-            f"✅ Расход добавлен (ID: {expense_id})\n"
-            f"💸 {amount:.2f} сом — {escape(description)}\n"
-            f"📎 Ответ на сообщение #{original_message_id}"
-        )
-        confirm_keyboard = _expense_actions_keyboard(expense_id, user_msg_id)
-        await update.message.reply_text(
-            reply_text,
-            reply_to_message_id=user_msg_id,
-            reply_markup=confirm_keyboard,
-            parse_mode="HTML"
-        )
 
-        # Если при добавлении этого расхода суточный лимит был превышен — отправляем предупреждение в группу
-        try:
-            if (
-                'new_total_today' in locals()
-                and 'previous_total_today' in locals()
-                and 'daily_limit' in locals()
-                and previous_total_today <= daily_limit
-                and new_total_today > daily_limit
-            ):
-                warning_text = (
-                    "🚨 ПРЕВЫШЕН ДНЕВНОЙ ЛИМИТ ПО РАСХОДАМ!\n"
-                    f"💵 Общая сумма за сегодня: {new_total_today:.2f} сом\n"
-                    f"📊 Установленный лимит: {daily_limit:.2f} сом"
-                )
-                await context.bot.send_message(
-                    chat_id=update.message.chat.id,
-                    text=warning_text
-                )
-        except Exception as warn_err:
-            logger.error(f"Ошибка при отправке предупреждения о превышении лимита: {warn_err}", exc_info=True)
+        await finalize_expense_add(update, context, amount=amount, description=description)
     except Exception as e:
         logger.error(f"Ошибка в handle_message: {e}", exc_info=True)
 
@@ -840,6 +917,11 @@ async def show_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE,
     
     expenses = db.get_expenses(chat_id, start_date, end_date)
     total = db.get_total_amount(chat_id, start_date, end_date)
+    is_single_day_period = (
+        start_date is not None
+        and end_date is not None
+        and start_date.date() == end_date.date()
+    )
     
     if not expenses:
         period_text = ""
@@ -861,6 +943,37 @@ async def show_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE,
     else:
         period_text = ""
     
+    if is_single_day_period:
+        grouped = {}
+        for expense in expenses:
+            _, _, _, amount, description, _, _, _ = expense
+            key = normalize_description(description)
+            if key not in grouped:
+                grouped[key] = {
+                    "description": (description or "Без описания").strip() or "Без описания",
+                    "amount": 0.0,
+                    "count": 0,
+                }
+            grouped[key]["amount"] += float(amount or 0)
+            grouped[key]["count"] += 1
+
+        grouped_items = sorted(grouped.values(), key=lambda item: item["amount"], reverse=True)
+        header = (
+            f"{period_text}💰 Позиций расходов: {len(grouped_items)}\n"
+            f"🧾 Всего записей: {len(expenses)}\n"
+            f"💵 Общая сумма: {total:.2f} сом\n\n"
+        )
+        message_parts.append(escape(header))
+        for item in grouped_items:
+            suffix = f" ({item['count']} шт.)" if item["count"] > 1 else ""
+            message_parts.append(
+                f"💸 {item['amount']:.2f} сом - {escape(item['description'])}{suffix}\n"
+            )
+        full_message = "\n".join(message_parts)
+        await update.message.reply_text(full_message, parse_mode='HTML')
+        await _delete_command_message(update)
+        return
+
     header = f"{period_text}💰 Всего расходов: {len(expenses)}\n💵 Общая сумма: {total:.2f} сом\n\n"
     message_parts.append(escape(header))
     
@@ -1071,6 +1184,67 @@ async def _delete_messages_safe(context, chat_id: int, *message_ids: int):
             await context.bot.delete_message(chat_id=chat_id, message_id=mid)
         except Exception:
             pass
+
+
+async def handle_expense_suggestion_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает подсказки по названию расхода перед сохранением."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    pending = context.user_data.get("pending_expense_add")
+    if not pending:
+        await query.edit_message_text("⌛ Подсказка устарела. Отправьте расход заново.")
+        return
+
+    if query.message.chat.id != pending.get("chat_id") or query.from_user.id != pending.get("user_id"):
+        await query.answer("❌ Это не ваша подсказка", show_alert=True)
+        return
+
+    callback_data = query.data or ""
+    final_description = pending.get("description", "")
+
+    if callback_data == "exp_suggest_cancel":
+        context.user_data.pop("pending_expense_add", None)
+        await query.edit_message_text("❌ Добавление расхода отменено.")
+        return
+
+    if callback_data.startswith("exp_suggest_use:"):
+        try:
+            idx = int(callback_data.split(":", 1)[1])
+            suggestions = pending.get("suggestions") or []
+            if idx < 0 or idx >= len(suggestions):
+                raise ValueError("invalid suggestion index")
+            final_description = suggestions[idx]
+        except Exception:
+            await query.answer("❌ Не удалось выбрать подсказку", show_alert=True)
+            return
+    elif callback_data != "exp_suggest_keep":
+        await query.answer("❌ Неизвестное действие", show_alert=True)
+        return
+
+    try:
+        await query.edit_message_text(
+            f"✅ Выбрано название: {escape(final_description)}",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+    fake_update = Update(update.update_id, message=query.message.reply_to_message)
+    if not fake_update.message:
+        context.user_data.pop("pending_expense_add", None)
+        return
+
+    # Сохраняем расход от имени исходного сообщения с суммой из pending.
+    await finalize_expense_add(
+        fake_update,
+        context,
+        amount=float(pending.get("amount", 0)),
+        description=final_description,
+    )
+    context.user_data.pop("pending_expense_add", None)
 
 
 async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1642,6 +1816,9 @@ def main():
     application.add_handler(CommandHandler("export_week_pm", export_today_pm))
     application.add_handler(CommandHandler("export_month_pm", export_today_pm))
     
+    # Инлайн-кнопки подсказок названий при добавлении расхода
+    application.add_handler(CallbackQueryHandler(handle_expense_suggestion_callback, pattern="^exp_suggest"))
+
     # Инлайн-кнопки расходов: подтвердить, изменить сумму/название, удалить
     application.add_handler(CallbackQueryHandler(handle_expense_callback, pattern="^exp_"))
     
