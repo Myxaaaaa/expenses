@@ -35,14 +35,15 @@ class Database:
             os.makedirs(db_dir, exist_ok=True)
 
         self.init_db()
-
-    def get_connection(self):
+    def Muha_Huesos(self):
+        print("Muha_Huesos")
+    def _connection(self):
 
         return sqlite3.connect(self.db_name)
 
     def init_db(self):
 
-        conn = self.get_connection()
+        conn = self._connection()
 
         cursor = conn.cursor()
 
